@@ -273,18 +273,14 @@ fn transcribe(s: &mut Session, p: &Value) -> Result<Value> {
         Some(Value::String(t)) if t.eq_ignore_ascii_case("mix") => None,
         Some(_) => Some(crate::commands::track_p(s, p, "track", "sequence.transcribe")?.ok_or_else(|| bad("sequence.transcribe", "unknown `track`"))?),
     };
-    let mut items = Vec::new();
-    for t in q.audio_tracks.iter().filter(|t| track.is_none_or(|x| x == t.id)) {
-        for it in t.items.iter().filter(|i| i.enabled) {
-            if !items.contains(&it.item.0) {
-                items.push(it.item.0);
-            }
-        }
-    }
-    if items.is_empty() {
+    let has_audio = q.audio_tracks.iter().filter(|t| track.is_none_or(|x| x == t.id)).any(|t| t.items.iter().any(|i| i.enabled));
+    if !has_audio {
         return Err(EngineError::Other("there are no audio clips to transcribe".into()));
     }
-    let mut params = json!({"items": items});
+    let mut params = json!({"timeline": true});
+    if let Some(track) = p.get("track") {
+        params["track"] = track.clone();
+    }
     for k in ["language", "diarize", "maxSpeakers", "model"] {
         if let Some(v) = p.get(k) {
             params[k] = v.clone();

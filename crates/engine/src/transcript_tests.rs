@@ -4,8 +4,31 @@ use serde_json::json;
 
 use crate::Session;
 use filmcraft_project::{ItemId, Transcript, Word};
-use filmcraft_speech::FixedTranscriber;
+use filmcraft_speech::{FixedTranscriber, Options, ProgressFn, SpeechError, Transcriber};
 use filmcraft_time::Tick;
+
+struct RecordingTranscriber {
+    lengths: std::sync::Mutex<Vec<usize>>,
+}
+
+impl Transcriber for RecordingTranscriber {
+    fn id(&self) -> String {
+        "recording".into()
+    }
+
+    fn transcribe(&self, audio: &[f32], _: &Options, progress: ProgressFn) -> Result<Transcript, SpeechError> {
+        self.lengths.lock().unwrap().push(audio.len());
+        if !progress(1.0, "Done") {
+            return Err(SpeechError::Cancelled);
+        }
+        Ok(Transcript {
+            language: "en".into(),
+            source: "recording".into(),
+            words: vec![Word::new("new", Tick::from_seconds_f64(0.25), Tick::from_seconds_f64(0.5))],
+            ..Default::default()
+        })
+    }
+}
 
 /// The demo project with a fake transcriber whose transcript fits the first A1 clip's media:
 /// "Hello um world." (Speaker 1), a 1.2 s pause, "Second speaker here." (Speaker 2).
@@ -70,6 +93,40 @@ fn generate_inspect_search_and_rename() {
     s.execute("edit.undo", json!({})).unwrap();
     s.execute("edit.undo", json!({})).unwrap();
     assert!(s.project.transcripts.is_empty());
+}
+
+#[test]
+fn timeline_transcription_uses_trimmed_source_ranges_and_preserves_other_words() {
+    let (mut s, item, _) = session();
+    let sequence_id = s.state.active_sequence.unwrap();
+    let sequence = Arc::make_mut(&mut s.project).sequence_mut(sequence_id).unwrap();
+    let clip = sequence.audio_tracks[0].items[0].clone();
+    for other in sequence.audio_tracks.iter_mut().flat_map(|track| &mut track.items).filter(|other| other.id != clip.id) {
+        other.enabled = false;
+    }
+    let edited = sequence.audio_tracks[0].item_mut(clip.id).unwrap();
+    edited.source_in = Tick::from_seconds_f64(2.0);
+    edited.duration = Tick::from_seconds_f64(1.0);
+
+    let mut existing = Transcript { language: "en".into(), source: "manual".into(), ..Default::default() };
+    existing.words.push(Word::new("keep", Tick::from_seconds_f64(0.2), Tick::from_seconds_f64(0.4)));
+    existing.words.push(Word::new("replace", Tick::from_seconds_f64(2.2), Tick::from_seconds_f64(2.4)));
+    Arc::make_mut(&mut s.project).transcripts.insert(item, Arc::new(existing));
+
+    let transcriber = Arc::new(RecordingTranscriber { lengths: Default::default() });
+    s.transcriber = Some(transcriber.clone());
+    s.execute("transcript.generate", json!({"timeline": true})).unwrap();
+
+    assert_eq!(*transcriber.lengths.lock().unwrap(), [16_000], "only the one-second timeline trim was decoded");
+    let transcript = &s.project.transcripts[&item];
+    assert_eq!(transcript.source, "recording");
+    assert_eq!(
+        transcript.words.iter().map(|word| (word.text.as_str(), word.start, word.end)).collect::<Vec<_>>(),
+        [("keep", Tick::from_seconds_f64(0.2), Tick::from_seconds_f64(0.4)), ("new", Tick::from_seconds_f64(2.25), Tick::from_seconds_f64(2.5)),],
+        "timeline transcript words map to source time; old words in the re-transcribed range are replaced",
+    );
+    let sequence_words = s.execute("transcript.inspect", json!({})).unwrap();
+    assert_eq!(sequence_words["words"][0]["start"], (clip.start + Tick::from_seconds_f64(0.25)).0);
 }
 
 #[test]

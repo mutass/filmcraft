@@ -17,12 +17,15 @@ the control channel and MCP agents can do the same.
   reversed and frame-hold clips contribute nothing.
 - Speaker names come from the clip transcripts, so renaming "Speaker 1" in every transcript renames
   it across the sequence.
+- The Text panel's **Transcribe** button reads the source in/out range of each enabled audio clip on
+  enabled timeline tracks; it does not analyze the full song or source file. Reverse and frame-hold
+  clips are skipped. A single clip is limited to 30 minutes per request to bound memory use.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `transcript.generate` | Transcribe media items (`items`, else the Project selection, else the media of the sequence's audio clips). Params: `model` (default `whisper-base`), `language` (`auto` = detect), `diarize`, `maxSpeakers`. One undo step. |
+| `transcript.generate` | Transcribe media items (`items`, else the Project selection, else the media of the sequence's audio clips). With `timeline:true`, transcribe only enabled audio clip source ranges in the active sequence and replace transcript words in those ranges, preserving words outside them. Params: `model` (default `whisper-base`), `language` (`auto` = detect), `diarize`, `maxSpeakers`. One undo step. |
 | `transcript.set` | Store a transcript you bring (JSON: `language`, `speakers`, `words` with `text`/`start`/`end`/`speaker`); it is sorted and made well formed. |
 | `transcript.delete` | Remove transcripts. |
 | `transcript.inspect` | The sequence transcript: words (index, text, sequence times, speaker, clip), paragraphs, speakers, the word at the playhead. |
@@ -82,6 +85,6 @@ Apple-silicon laptop CPU).
 
 ## Limits
 
-- Transcription runs synchronously inside the command (no background job or progress bar yet).
+- Transcription runs synchronously inside the command (no background job or progress bar yet). The Text panel's Transcribe button uses timeline ranges; direct `transcript.generate` calls without `timeline:true` retain whole-media behavior.
 - Track items that refer to a subclip are looked up by the subclip's id, so a transcript made for
   the parent media is not shown through subclip clips yet.

@@ -123,6 +123,188 @@ fn item_audio(s: &Session, item: ItemId) -> Option<Vec<f32>> {
     Some(filmcraft_speech::downmix(&buf.channels))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimelineAudioTarget {
+    item: ItemId,
+    source_item: ItemId,
+    source_start: Tick,
+    source_end: Tick,
+    clip_start: Tick,
+    stream: usize,
+}
+
+const MAX_TIMELINE_TRANSCRIPT_SECONDS: i64 = 30 * 60;
+
+fn timeline_targets(s: &Session, p: &Value) -> Result<Vec<TimelineAudioTarget>> {
+    let selected_track = match p.get("track") {
+        None => None,
+        Some(Value::String(name)) if name.eq_ignore_ascii_case("mix") => None,
+        Some(_) => crate::commands::track_p(s, p, "track", "transcript.generate")?,
+    };
+    let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let mut targets = Vec::new();
+    for clip in q
+        .audio_tracks
+        .iter()
+        .filter(|audio_track| audio_track.enabled && selected_track.is_none_or(|selected| selected == audio_track.id))
+        .flat_map(|audio_track| &audio_track.items)
+        .filter(|clip| clip.enabled)
+    {
+        if clip.reverse || clip.frame_hold.is_some() || !clip.speed.is_finite() || clip.speed <= 0.0 || clip.duration.0 <= 0 {
+            continue;
+        }
+        let consumed = clip.duration.0 as f64 * clip.speed;
+        if !consumed.is_finite() || consumed <= 0.0 || consumed > i64::MAX as f64 {
+            return Err(EngineError::Other(format!("audio clip {} has an invalid source duration", clip.id.0)));
+        }
+        let requested_end = clip
+            .source_in
+            .0
+            .checked_add(consumed.round() as i64)
+            .map(Tick)
+            .ok_or_else(|| EngineError::Other(format!("audio clip {} source range overflows", clip.id.0)))?;
+        let max_duration = MAX_TIMELINE_TRANSCRIPT_SECONDS * TICKS_PER_SECOND;
+        if clip.source_in.0 < 0 || requested_end <= clip.source_in || requested_end.0.saturating_sub(clip.source_in.0) > max_duration {
+            return Err(EngineError::Other(format!("audio clip {} source range is invalid or longer than 30 minutes", clip.id.0)));
+        }
+        let Some((source_item, media, subclip_range)) = s.project.resolve_media(clip.item) else {
+            return Err(EngineError::Other(format!("audio clip {} does not refer to media that can be transcribed", clip.id.0)));
+        };
+        let offset = subclip_range.map_or(Tick::ZERO, |range| range.start);
+        let available = subclip_range.map_or(media.duration(), |range| range.duration);
+        if clip.source_in >= available {
+            continue;
+        }
+        let source_end = Tick(requested_end.0.min(available.0));
+        let source_start =
+            offset.0.checked_add(clip.source_in.0).map(Tick).ok_or_else(|| EngineError::Other(format!("audio clip {} source start overflows", clip.id.0)))?;
+        let source_end_absolute =
+            offset.0.checked_add(source_end.0).map(Tick).ok_or_else(|| EngineError::Other(format!("audio clip {} source end overflows", clip.id.0)))?;
+        let target = TimelineAudioTarget {
+            item: clip.item,
+            source_item,
+            source_start,
+            source_end: source_end_absolute,
+            clip_start: clip.source_in,
+            stream: clip.audio_stream,
+        };
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    Ok(targets)
+}
+
+fn timeline_audio(s: &Session, target: TimelineAudioTarget) -> Result<Vec<f32>> {
+    let src = s.source(target.source_item).ok_or_else(|| EngineError::Other(format!("media source for item {} is unavailable", target.item.0)))?;
+    if src.info().audio_streams.get(target.stream).is_none() {
+        return Err(EngineError::Other(format!("audio stream {} for item {} is unavailable", target.stream, target.item.0)));
+    }
+    let sr = filmcraft_speech::SAMPLE_RATE;
+    let start = target.source_start.to_units_floor(sr as i64);
+    let end = target.source_end.to_units_floor(sr as i64);
+    let frames = end.checked_sub(start).ok_or_else(|| EngineError::Other(format!("audio range for item {} overflows", target.item.0)))?;
+    let max_frames = MAX_TIMELINE_TRANSCRIPT_SECONDS.checked_mul(sr as i64).ok_or_else(|| EngineError::Other("transcript audio limit overflows".into()))?;
+    if start < 0 || frames <= 0 || frames > max_frames {
+        return Err(EngineError::Other(format!("audio range for item {} is invalid or longer than 30 minutes", target.item.0)));
+    }
+    let frames = usize::try_from(frames).map_err(|_| EngineError::Other(format!("audio range for item {} is too large", target.item.0)))?;
+    let buf = src.audio_stream(target.stream, start, frames, sr).map_err(|e| EngineError::Other(format!("audio for item {}: {e}", target.item.0)))?;
+    Ok(filmcraft_speech::downmix(&buf.channels))
+}
+
+fn timeline_transcript(
+    s: &Session,
+    targets: &[TimelineAudioTarget],
+    t: &Arc<dyn Transcriber>,
+    opts: &Options,
+) -> Result<(Vec<(ItemId, Transcript)>, Vec<u64>)> {
+    let mut transcripts: Vec<(ItemId, Transcript, Vec<TimeRange>)> = Vec::new();
+    let mut skipped = Vec::new();
+    for target in targets {
+        let audio = timeline_audio(s, *target)?;
+        let mut generated = t.transcribe(&audio, opts, &mut |_, _| true).map_err(speech_err)?;
+        if generated.source.is_empty() {
+            generated.source = t.id();
+        }
+        let range = TimeRange::from_bounds(target.clip_start, target.source_end - (target.source_start - target.clip_start));
+        let shift = target.clip_start;
+        let mut words = Vec::with_capacity(generated.words.len());
+        for mut word in generated.words.drain(..) {
+            word.start = word
+                .start
+                .0
+                .checked_add(shift.0)
+                .map(Tick)
+                .ok_or_else(|| EngineError::Other(format!("transcript word time overflows for item {}", target.item.0)))?;
+            word.end = word
+                .end
+                .0
+                .checked_add(shift.0)
+                .map(Tick)
+                .ok_or_else(|| EngineError::Other(format!("transcript word time overflows for item {}", target.item.0)))?;
+            let midpoint = Tick(word.start.0.saturating_add(word.end.0.saturating_sub(word.start.0) / 2));
+            if range.contains(midpoint) {
+                words.push(word);
+            }
+        }
+        generated.words = words;
+        generated.normalize();
+        if generated.words.is_empty() {
+            skipped.push(target.item.0);
+        }
+        if let Some((_, transcript, ranges)) = transcripts.iter_mut().find(|(item, _, _)| *item == target.item) {
+            ranges.push(range);
+            transcript.words.extend(generated.words);
+            for speaker in generated.speakers {
+                if !transcript.speakers.iter().any(|existing| existing.name == speaker.name) {
+                    transcript.speakers.push(speaker);
+                }
+            }
+            transcript.source = generated.source;
+            if !generated.language.is_empty() {
+                transcript.language = generated.language;
+            }
+        } else {
+            transcripts.push((target.item, generated, vec![range]));
+        }
+    }
+    let mut done = Vec::with_capacity(transcripts.len());
+    for (item, mut generated, ranges) in transcripts {
+        let mut transcript = s.project.transcripts.get(&item).map(|existing| existing.as_ref().clone()).unwrap_or_default();
+        transcript.words.retain(|word| {
+            let midpoint = Tick(word.start.0.saturating_add(word.end.0.saturating_sub(word.start.0) / 2));
+            !ranges.iter().any(|range| range.contains(midpoint))
+        });
+        if !generated.language.is_empty() {
+            transcript.language = generated.language;
+        }
+        if !generated.source.is_empty() {
+            transcript.source = generated.source;
+        }
+        let mut speaker_map = Vec::with_capacity(generated.speakers.len());
+        for speaker in generated.speakers {
+            let index = match transcript.speakers.iter().position(|existing| existing.name == speaker.name) {
+                Some(index) => index,
+                None => {
+                    transcript.speakers.push(speaker);
+                    transcript.speakers.len() - 1
+                }
+            };
+            speaker_map.push(u32::try_from(index).map_err(|_| EngineError::Other(format!("too many speakers in transcript for item {}", item.0)))?);
+        }
+        for mut word in generated.words.drain(..) {
+            if let Some(speaker) = word.speaker {
+                word.speaker = speaker_map.get(speaker as usize).copied();
+            }
+            transcript.words.push(word);
+        }
+        transcript.normalize();
+        done.push((item, transcript));
+    }
+    Ok((done, skipped))
+}
+
 fn speech_err(e: SpeechError) -> EngineError {
     EngineError::Other(e.to_string())
 }
@@ -145,6 +327,9 @@ fn transcriber(s: &Session, p: &Value) -> Result<Arc<dyn Transcriber>> {
 }
 
 fn generate(s: &mut Session, p: &Value) -> Result<Value> {
+    if bool_p(p, "timeline").unwrap_or(false) {
+        return generate_timeline(s, p);
+    }
     let items = targets(s, p);
     if items.is_empty() {
         return Err(bad("transcript.generate", "nothing to transcribe (pass `items`, select clips, or open a sequence with audio)"));
@@ -182,6 +367,43 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit("Transcribe", move |pr, _| {
         for (i, t) in done {
             pr.transcripts.insert(i, Arc::new(t));
+        }
+        Ok(())
+    })?;
+    Ok(json!({"items": report, "skipped": skipped}))
+}
+
+fn generate_timeline(s: &mut Session, p: &Value) -> Result<Value> {
+    let targets = timeline_targets(s, p)?;
+    if targets.is_empty() {
+        return Err(bad("transcript.generate", "the active sequence has no enabled audio clips to transcribe"));
+    }
+    let t = transcriber(s, p)?;
+    let ma = &s.prefs.media_analysis;
+    let default_language = if ma.language_auto_detect { None } else { Some(ma.default_language.clone()) };
+    let opts = Options {
+        language: match str_p(p, "language") {
+            Some(l) => Some(l).filter(|l| !l.is_empty() && *l != "auto").map(str::to_string),
+            None => default_language,
+        },
+        diarize: bool_p(p, "diarize").unwrap_or(ma.speaker_labeling != "off"),
+        max_speakers: u64_p(p, "maxSpeakers").map(|n| n.clamp(1, 32) as usize).unwrap_or(Options::default().max_speakers),
+    };
+    let (done, skipped) = timeline_transcript(s, &targets, &t, &opts)?;
+    let report: Vec<Value> = done
+        .iter()
+        .map(|(item, transcript)| {
+            let ranges: Vec<Value> = targets
+                .iter()
+                .filter(|target| target.item == *item)
+                .map(|target| json!({"start": target.clip_start.0, "end": target.source_end.0 - (target.source_start.0 - target.clip_start.0)}))
+                .collect();
+            json!({"item": item.0, "words": transcript.words.len(), "speakers": transcript.speakers.len(), "language": transcript.language, "source": transcript.source, "ranges": ranges})
+        })
+        .collect();
+    s.edit("Transcribe Timeline", move |pr, _| {
+        for (item, transcript) in done {
+            pr.transcripts.insert(item, Arc::new(transcript));
         }
         Ok(())
     })?;
@@ -439,7 +661,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "transcript.generate",
             "Transcribe…",
             &["Sequence", "Transcript"],
-            r#"{"items":[id]?,"model":"whisper-base"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?}"#,
+            r#"{"items":[id]?,"timeline":bool?,"track":"mix"|id?,"model":"whisper-base"?,"language":"en|auto"?,"diarize":bool?,"maxSpeakers":n?}"#,
             can_transcribe,
             generate,
             true,
