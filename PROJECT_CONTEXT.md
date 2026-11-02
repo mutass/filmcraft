@@ -19,6 +19,41 @@ repository.
 
 ## Recent work
 
+### Windows multi-vendor H.264 hardware encoding
+
+Registered a Media Foundation hardware H.264 encoder factory for Windows, behind Export ▸ Hardware
+Encoding = Auto. NVIDIA NVENC remains preferred; compatible synchronous and asynchronous hardware
+MFTs are the fallback for AMD, Intel, or NVIDIA drivers. Asynchronous MFTs use bounded event-driven
+input/output, and D3D-aware MFTs receive NV12 through D3D11 video-encoder surfaces. A focused
+24-frame encode/flush and FilmCraft software-decode round trip passed on the available AMD hardware
+MFT. The path is limited to progressive SDR BT.709 NV12 inputs and still spends CPU time converting
+rendered RGBA frames; it accelerates encoding, not timeline rendering or colour conversion. See
+[platform hardware-encoding details](crates/platform/README.md).
+
+A 10-second, 250-frame export with both GPU Rendering and Hardware Encoding set to Auto initially
+completed through `AMDh264Encoder` in 953.2 seconds (0.262 fps), slower than the earlier
+692.4-second run. Its GPU renderer hit out-of-memory and fell back to CPU, although AMD hardware
+encoding still handled all 250 frames. After reducing GPU export memory use, the same test
+completed in 329.2 seconds (0.759 fps) without a GPU out-of-memory fallback. That is faster than
+both previous runs, but still takes over five minutes for ten seconds of footage; it is not a
+full-sequence result or a general speed guarantee.
+
+To address the renderer OOM, export renderer concurrency is now adapter-class dependent (one
+compositor for integrated/software GPUs, two for virtual GPUs, up to four for discrete GPUs).
+Export-only compositors also retain four uploaded source textures instead of the interactive
+compositor's 24. The memory limits have now been exercised on the Vega 6 with the successful
+short export above.
+
+### FilmCraft live-editing workflow skill
+
+Added [`.github/skills/filmcraft-live-editing/SKILL.md`](.github/skills/filmcraft-live-editing/SKILL.md) and its
+[verified lessons](.github/skills/filmcraft-live-editing/lessons.md) to guide future live FilmCraft edits.
+The workflow requires discovering MCP command schemas, inspecting project/sequence state, verifying
+actual rendered frames and track state, and confirming the project is saved. The lessons record the
+opacity-keyframe, overlay stacking/placement, and audio-mute checks verified during the Nyange
+showcase work. Update the lessons file when future FilmCraft sessions yield additional verified,
+reusable findings.
+
 ### Timeline-based transcription
 
 The Text panel's **Transcribe** action now transcribes audio represented by enabled clips on enabled

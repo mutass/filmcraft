@@ -17,6 +17,16 @@ use filmcraft_render::plan::{FramePlan, plan_frame};
 use filmcraft_render::{Image, RenderOptions, SourceProvider};
 use filmcraft_time::Tick;
 
+const MAX_EXPORT_RENDERERS: usize = 4;
+
+fn renderer_concurrency(device_type: wgpu::DeviceType) -> usize {
+    match device_type {
+        wgpu::DeviceType::DiscreteGpu => MAX_EXPORT_RENDERERS,
+        wgpu::DeviceType::VirtualGpu => 2,
+        wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu | wgpu::DeviceType::Other => 1,
+    }
+}
+
 /// Where export rendering spends its time (process-wide totals, for the bench).
 pub mod timing {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -95,6 +105,7 @@ pub struct ExportRenderer {
     #[expect(dead_code, reason = "kept for future frame-accuracy flows (readback fences)")]
     queue: wgpu::Queue,
     compositor: GpuCompositor,
+    max_concurrency: usize,
 }
 
 impl ExportRenderer {
@@ -102,8 +113,8 @@ impl ExportRenderer {
     /// wgpu backend.
     pub fn new() -> Option<Self> {
         // `None` is kept too: a machine without an adapter does not search again on every export
-        static SHARED: std::sync::OnceLock<Option<(wgpu::Instance, wgpu::Device, wgpu::Queue)>> = std::sync::OnceLock::new();
-        let (instance, device, queue) = SHARED
+        static SHARED: std::sync::OnceLock<Option<(wgpu::Instance, wgpu::Device, wgpu::Queue, usize)>> = std::sync::OnceLock::new();
+        let (instance, device, queue, max_concurrency) = SHARED
             .get_or_init(|| {
                 // A build without a wgpu backend for this platform (`cargo build -p filmcraft-cli`
                 // alone: this crate asks for none) has no GPU to offer, and `Instance::default()`
@@ -113,20 +124,26 @@ impl ExportRenderer {
                 }
                 let instance = wgpu::Instance::default();
                 let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+                let max_concurrency = renderer_concurrency(adapter.get_info().device_type);
                 let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
                 // wgpu's default handler panics on a validation or out-of-memory error; log it and
                 // send the remaining frames to the CPU instead.
                 device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| mark_device_failed(&format!("GPU error: {e}"))));
                 device.set_device_lost_callback(|reason, msg| mark_device_failed(&format!("GPU device lost ({reason:?}): {msg}")));
-                Some((instance, device, queue))
+                Some((instance, device, queue, max_concurrency))
             })
             .as_ref()?
             .clone();
         if device_failed() {
             return None;
         }
-        let compositor = GpuCompositor::new(&device, &queue);
-        Some(Self { _instance: instance, device, queue, compositor })
+        let compositor = GpuCompositor::new_for_export(&device, &queue);
+        Some(Self { _instance: instance, device, queue, compositor, max_concurrency })
+    }
+
+    /// Maximum export-frame concurrency recommended for the selected adapter's memory class.
+    pub fn max_concurrency(&self) -> usize {
+        self.max_concurrency
     }
 
     /// One frame as `render_sequence` would return it (premultiplied linear-light RGBA at the
@@ -168,6 +185,15 @@ mod tests {
     use std::sync::Arc;
 
     const EPS: f32 = 1e-4;
+
+    #[test]
+    fn export_renderer_concurrency_respects_adapter_memory_class() {
+        assert_eq!(renderer_concurrency(wgpu::DeviceType::DiscreteGpu), MAX_EXPORT_RENDERERS);
+        assert_eq!(renderer_concurrency(wgpu::DeviceType::VirtualGpu), 2);
+        assert_eq!(renderer_concurrency(wgpu::DeviceType::IntegratedGpu), 1);
+        assert_eq!(renderer_concurrency(wgpu::DeviceType::Cpu), 1);
+        assert_eq!(renderer_concurrency(wgpu::DeviceType::Other), 1);
+    }
 
     /// A solid colour generator at 320×180 plus a tone generator (mirrors the export tests'
     /// fixture-free project helper).

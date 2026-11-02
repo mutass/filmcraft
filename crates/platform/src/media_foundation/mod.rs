@@ -27,6 +27,8 @@
 //! (docs/adr/0001-platform-ffi.md); this one is safe code.
 
 #[allow(unsafe_code)]
+pub mod encoder;
+#[allow(unsafe_code)]
 mod gpu;
 #[allow(unsafe_code)]
 mod mft;

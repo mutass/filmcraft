@@ -13,10 +13,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use windows::Win32::Foundation::{HMODULE, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_STAGING, D3D11_VIDEO_DECODER_DESC, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, ID3D11VideoDevice,
+    D3D11_BIND_VIDEO_ENCODER, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
+    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11_VIDEO_DECODER_DESC, D3D11CreateDevice, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, ID3D11VideoDevice,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
 use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
@@ -99,10 +100,49 @@ impl Gpu {
         if let Some(g) = slot.as_ref().filter(|g| g.usable()) {
             return Ok(g.clone());
         }
+
         let g = Arc::new(Gpu::create(api)?);
         log::info!("hardware decoding: Direct3D 11 device on {}", g.name);
         *slot = Some(g.clone());
         Ok(g)
+    }
+
+    /// Upload one checked NV12 picture as a D3D11 video-encoder surface and wrap it for Media
+    /// Foundation. D3D-aware encoder MFTs may reject system-memory input samples.
+    pub(super) fn encoder_sample(&self, api: &MfApi, data: &[u8], width: u32, height: u32, time: i64) -> Result<IMFSample, String> {
+        if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(format!("invalid NV12 surface size {width}x{height}"));
+        }
+        let expected = usize::try_from(width)
+            .ok()
+            .and_then(|w| usize::try_from(height).ok().and_then(|h| w.checked_mul(h)))
+            .and_then(|luma| luma.checked_add(luma / 2))
+            .ok_or_else(|| "NV12 surface size overflows".to_string())?;
+        if data.len() != expected {
+            return Err(format!("NV12 surface has {} bytes; expected {expected}", data.len()));
+        }
+        let slice_pitch = u32::try_from(data.len()).map_err(|_| "NV12 surface is too large".to_string())?;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_VIDEO_ENCODER.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial = D3D11_SUBRESOURCE_DATA { pSysMem: data.as_ptr().cast(), SysMemPitch: width, SysMemSlicePitch: slice_pitch };
+        let _gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut texture: Option<ID3D11Texture2D> = None;
+        // SAFETY: the descriptor matches the validated NV12 byte buffer; its pointer remains
+        // valid for the duration of CreateTexture2D, which copies the initial subresource data.
+        unsafe { self.device.CreateTexture2D(&desc, Some(&initial), Some(&mut texture)) }
+            .map_err(|e| format!("cannot create the NV12 encoder surface: {e}"))?;
+        let texture = texture.ok_or_else(|| "D3D11 returned no NV12 encoder surface".to_string())?;
+        api.dxgi_surface_sample(&texture, time)
     }
 
     fn create(api: &MfApi) -> Result<Gpu, String> {

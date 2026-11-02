@@ -945,6 +945,15 @@ pub fn encoder_registered(f: EncoderFactory) -> bool {
 /// linear-light RGBA), or `None` to let the CPU render this frame (no adapter, a plan the GPU
 /// cannot draw, any internal error): the CPU renderer is the reference and the fallback.
 pub trait FrameRenderer: Send {
+    /// Maximum number of frames this renderer type should composite concurrently.
+    ///
+    /// The export pipeline may create several independent renderers for discrete GPUs, while
+    /// memory-constrained backends can request a smaller pool. The default preserves the
+    /// existing pipeline-selected limit.
+    fn max_concurrency(&self) -> usize {
+        usize::MAX
+    }
+
     fn render(
         &mut self,
         project: &Project,

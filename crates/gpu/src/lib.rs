@@ -83,6 +83,7 @@ pub struct GpuCompositor {
     output: Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>,
     accum_readback_buf: Option<(wgpu::Buffer, u64)>,
     uploads: HashMap<(usize, u32, u32), Uploaded>,
+    upload_cache_capacity: usize,
     clock: u64,
     dummy: wgpu::TextureView,
     /// The effect stage (None on devices without compute shaders or storage textures: layers
@@ -277,6 +278,14 @@ fn prepare_layers(layers: &[PlanLayer]) -> PreparedPlan {
 
 impl GpuCompositor {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        Self::new_with_upload_cache_capacity(device, queue, 24)
+    }
+
+    pub(crate) fn new_for_export(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        Self::new_with_upload_cache_capacity(device, queue, 4)
+    }
+
+    fn new_with_upload_cache_capacity(device: &wgpu::Device, queue: &wgpu::Queue, upload_cache_capacity: usize) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("filmcraft-composite"),
             source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
@@ -419,6 +428,7 @@ impl GpuCompositor {
             output: None,
             accum_readback_buf: None,
             uploads: HashMap::new(),
+            upload_cache_capacity,
             clock: 0,
             dummy,
             fx,
@@ -577,10 +587,10 @@ impl GpuCompositor {
         };
         self.uploads.insert(key, up);
         // keep the most recent uploads (enough for several stacked layers + playback lookahead)
-        if self.uploads.len() > 24 {
+        if self.uploads.len() > self.upload_cache_capacity {
             let mut v: Vec<(u64, (usize, u32, u32))> = self.uploads.iter().map(|(k, u)| (u.last_used, *k)).collect();
             v.sort_unstable();
-            for (_, k) in v.into_iter().take(self.uploads.len() - 24) {
+            for (_, k) in v.into_iter().take(self.uploads.len() - self.upload_cache_capacity) {
                 self.uploads.remove(&k);
             }
         }

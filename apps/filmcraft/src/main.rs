@@ -400,6 +400,10 @@ fn open_path(path: &str, reveal: bool) -> Result<(), String> {
 struct GpuFrameRenderer(filmcraft_gpu::ExportRenderer);
 
 impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
+    fn max_concurrency(&self) -> usize {
+        self.0.max_concurrency()
+    }
+
     fn render(
         &mut self,
         project: &filmcraft_project::Project,

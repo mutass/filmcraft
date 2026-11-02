@@ -139,6 +139,17 @@ CPU. GPU rendering is nevertheless **Off by default** (opt-in per export) until 
 measured on Windows and macOS: the GPU result matches the CPU within the compositor's parity
 tolerance, not bit for bit, and Off keeps exports byte-reproducible on every machine. (The 4K row used the same scene with the sequence, clip and positions scaled to 4K.)
 
+Export concurrency now follows the adapter's memory class: discrete GPUs may use up to four
+compositors, integrated GPUs and software adapters use one, and virtual GPUs use two. Export
+compositors also retain at most four source textures each (the interactive compositor retains up
+to 24 for lookahead). This bounds GPU memory on shared-memory adapters, where the system and
+video decoder compete with rendering. On the integrated Vega 6 Windows test machine, the previous
+four-renderer export hit out-of-memory and permanently fell back to the CPU for that process. With
+these limits, the same 10-second 1080p H.264 export completed in 329.2 seconds without an
+out-of-memory fallback, versus 953.2 seconds in the prior run and 692.4 seconds in the original
+run. This is a promising machine-specific result, not a general speed guarantee; the export still
+took over five minutes for ten seconds of footage.
+
 ### Memory after an export
 
 The recycled images stay on the shelves of `filmcraft_frame::pool` (up to 320 MiB of them, and

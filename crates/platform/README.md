@@ -61,7 +61,7 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   - After a `flush` (which drains the MFT) the MFT only restarts at an IDR picture; the GOP cache
     always seeks after a flush, and a caller that continues from the middle of a GOP gets an error
     that `HybridDecoder` answers by replaying the run in software.
-- **Windows and 64-bit Linux: NVIDIA NVENC H.264 encoding, and H.265 (HEVC) on Windows** (`nvenc/`), 8-bit SDR 4:2:0 for Export. The driver's
+- **Windows: Media Foundation hardware H.264 encoding and NVIDIA NVENC H.264 / H.265 (HEVC)** (`media_foundation/encoder.rs`, `nvenc/`); **64-bit Linux: NVIDIA NVENC H.264** (`nvenc/`), 8-bit SDR 4:2:0 for Export. The driver's
   `nvEncodeAPI64.dll` (Windows) or `libnvidia-encode.so.1` (Linux), API 12.1, is loaded at run time,
   so machines without NVIDIA still start. Windows uses a Direct3D 11 device; Linux retains a primary
   CUDA context through the runtime-loaded `libcuda.so.1`, released after the encoder is destroyed.
@@ -78,6 +78,19 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
   ends it with an error, since a hardware stream cannot be finished in software. The same session,
   ring and input path encode H.265, see [Hardware H.265 (HEVC) encoding (Windows,
   NVENC)](#hardware-h265-hevc-encoding-windows-nvenc).
+- **Windows H.264 also supports compatible AMD, Intel, and NVIDIA Media Foundation hardware MFTs**
+  (`media_foundation/encoder.rs`). Export ▸ Hardware Encoding must be Auto. NVIDIA NVENC is tried
+  first; if it declines, Media Foundation enumerates installed synchronous and asynchronous
+  hardware encoder MFTs that accept NV12 and produce H.264. Asynchronous MFTs use bounded,
+  event-driven input/output; D3D-aware MFTs receive NV12 through a D3D11 video-encoder surface.
+  The OS/driver determines which adapters and settings are actually available; this is not a
+  guarantee for every GPU. This path currently accepts progressive SDR BT.709 limited-range,
+  even-sized 8-bit 4:2:0, single-pass CBR or VBR, and Baseline / Main / High profiles. It declines
+  HDR, interlacing, non-square pixels, two-pass VBR, and incompatible drivers/settings, then the
+  existing software H.264 encoder is used. Frames are converted from rendered RGBA to NV12 on the
+  CPU before the hardware encode, so this accelerates encoding only; it does not make timeline
+  rendering or colour conversion GPU-based. Once an encoder is selected, mid-export failures are
+  reported rather than silently switching encoders.
 - **Linux: NVDEC, H.264 (`avcC`) and HEVC (`hvcC`)** on NVIDIA's proprietary driver (`nvdec/`): H.264
   8-bit and HEVC 8- / 10-bit, 4:2:0 progressive. `libnvcuvid.so.1` and `libcuda.so.1` are loaded at
   run time; without them (or without a device) nothing is registered. NVIDIA's own parser takes the
@@ -301,6 +314,7 @@ level 4 High tier, which many hardware decoders refuse; it is now level 4.1 Main
 | `tests/it/nvenc_hevc_probe.rs` (Windows) | the HEVC probe in a fresh process: its cost, the cached answer, `available(Hevc)` following it after `register()` (twice) |
 | `tests/nvenc_hevc_warm.rs` (Windows) | `register()` answers the HEVC and the Main 10 questions on a thread of its own, before anyone asks; the answers are kept and `hdr_available(Hevc)` follows the Main 10 probe |
 | `tests/it/nvenc_hevc_main10.rs` (Windows, NVIDIA with 10-bit HEVC) | HEVC Main 10 in process, PQ and HLG: a float picture (grey ramp to peak white, a moving box, saturated BT.2020 bars) is converted with `rgbf_to_yuv420_10`, encoded and decoded with our HEVC decoder (`Yuv16`, 10 bits, codes below 1024): worst 71.1 dB luma / 70.6 dB chroma PSNR on the 10-bit scale, 803 distinct luma levels on a ramp row, peak code 940 survives; IDR at 0 and 24; the VUI is BT.2020 / 16 or 18 / BT.2020 NCL / limited; the IDR samples carry two prefix SEI NAL units whose messages are byte-for-byte the expected 137 / 144 payloads (HLG: none; other pictures: none); Main and Main 10 refuse each other's pictures; hostile sizes, bitrates, signals, huge or empty SEI payloads, encoders dropped with SEI in flight |
+| `src/media_foundation/encoder.rs` unit tests (Windows, compatible hardware MFT) | A 24-frame H.264 encode/flush through an installed hardware MFT, then decode every packet with FilmCraft's software decoder; exercises synchronous or event-driven asynchronous MFTs and D3D11 surface input where provided by the driver |
 | `tests/nvenc_hevc_hdr_export.rs` (Windows, NVIDIA with 10-bit HEVC) | HDR sequences through the real export job (PQ MP4, HLG MP4, PQ QuickTime): 24 frames, 1 session, 0 declined; ffprobe `hevc` / `Main 10` / `hvc1` / `yuv420p10le`, `bt2020` / `smpte2084` or `arib-std-b67` / `bt2020nc` / `tv`; PQ first-frame side data Mastering display (max 10000000/10000, min 1/10000) and Content light level, HLG none; `ffmpeg -xerror` clean; ffmpeg's yuv420p10le picture equals our decoder's, code for code; our importer reads PQ / HLG, BT.2020, 10-bit, and the `colr` / `mdcv` / `clli` boxes; luma PSNR against a ProRes HDR export of the same sequence 62.6 dB (PQ) / 61.8 dB (HLG); `settings.sdr` and SDR sequences stay Main 8-bit BT.709 with no HDR boxes; the factory rejects mismatched or wrong-length pictures and clamps NaN / infinity |
 | `src/nvenc/abi_tests.rs` (Windows / Linux) | FFI structs' sizes, alignments, field offsets, constants, GUIDs and the bit-field masks of the `flags` words (H.264, HEVC, and the HEVC picture parameters with the SEI payload array) against a C compiler's view of NVIDIA's `nvEncodeAPI.h` (12.1) |
 | `src/nvenc/{mod,hevc,export}.rs` unit tests (Windows) | HEVC NAL types, stripping and parameter-set splitting (including `IDR_N_LP`, whose header byte reads as a PPS in H.264, and one-byte or truncated NAL units); the `hvcC` built from real VPS / SPS / PPS (Main and Main 10: accepted as what was asked for, refused as the other, other depths refused), every truncation and bit flip of the SPS, wrong profile, size and NAL types; HEVC levels; P010 layout (shift, little-endian, interleaving, pitch in bytes, narrow pitches and short buffers); the 10-bit capability decline; the SEI messages |

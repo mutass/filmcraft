@@ -13,7 +13,7 @@ use std::mem::ManuallyDrop;
 use std::sync::OnceLock;
 
 use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D11::ID3D11Device;
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform, MF_E_NO_MORE_TYPES, MF_E_NOTACCEPTING,
     MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE,
@@ -31,6 +31,7 @@ use super::gpu::{Gpu, SurfaceFormat, ensure_com};
 type StartupFn = unsafe extern "system" fn(u32, u32) -> HRESULT;
 type CreateFn = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
 type CreateBufferFn = unsafe extern "system" fn(u32, *mut *mut c_void) -> HRESULT;
+type CreateDxgiBufferFn = unsafe extern "system" fn(*const GUID, *mut c_void, u32, i32, *mut *mut c_void) -> HRESULT;
 type CreateManagerFn = unsafe extern "system" fn(*mut u32, *mut *mut c_void) -> HRESULT;
 type EnumFn = unsafe extern "system" fn(GUID, u32, *const MFT_REGISTER_TYPE_INFO, *const MFT_REGISTER_TYPE_INFO, *mut *mut *mut c_void, *mut u32) -> HRESULT;
 
@@ -39,6 +40,7 @@ pub struct MfApi {
     create_media_type: CreateFn,
     create_sample: CreateFn,
     create_memory_buffer: CreateBufferFn,
+    create_dxgi_surface_buffer: CreateDxgiBufferFn,
     create_manager: CreateManagerFn,
     enum_transforms: EnumFn,
 }
@@ -80,6 +82,7 @@ fn load() -> Result<MfApi, String> {
                 create_media_type: symbol(module, PCSTR(c"MFCreateMediaType".as_ptr().cast()))?,
                 create_sample: symbol(module, PCSTR(c"MFCreateSample".as_ptr().cast()))?,
                 create_memory_buffer: symbol(module, PCSTR(c"MFCreateMemoryBuffer".as_ptr().cast()))?,
+                create_dxgi_surface_buffer: symbol(module, PCSTR(c"MFCreateDXGISurfaceBuffer".as_ptr().cast()))?,
                 create_manager: symbol(module, PCSTR(c"MFCreateDXGIDeviceManager".as_ptr().cast()))?,
                 enum_transforms: symbol(module, PCSTR(c"MFTEnumEx".as_ptr().cast()))?,
             },
@@ -114,15 +117,47 @@ impl MfApi {
         Ok(manager)
     }
 
-    fn media_type(&self) -> Result<IMFMediaType, String> {
+    pub(super) fn media_type(&self) -> Result<IMFMediaType, String> {
         let mut raw = std::ptr::null_mut();
         // SAFETY: the out-pointer refers to a live local.
         let hr = unsafe { (self.create_media_type)(&mut raw) };
         made(hr, raw, "MFCreateMediaType")
     }
 
+    pub(super) fn output_sample(&self, size: u32) -> Result<IMFSample, String> {
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: the out-pointer refers to a live local.
+        let hr = unsafe { (self.create_memory_buffer)(size, &mut raw) };
+        let buffer: IMFMediaBuffer = made(hr, raw, "MFCreateMemoryBuffer")?;
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: the out-pointer refers to a live local.
+        let hr = unsafe { (self.create_sample)(&mut raw) };
+        let sample: IMFSample = made(hr, raw, "MFCreateSample")?;
+        // SAFETY: both COM interfaces are live and owned here.
+        unsafe { sample.AddBuffer(&buffer) }.map_err(|e| format!("cannot add the output buffer: {e}"))?;
+        Ok(sample)
+    }
+
+    pub(super) fn dxgi_surface_sample(&self, texture: &ID3D11Texture2D, time: i64) -> Result<IMFSample, String> {
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: the live D3D11 texture is passed with its interface id; Media Foundation returns
+        // a new buffer reference in `raw`.
+        let hr = unsafe { (self.create_dxgi_surface_buffer)(&ID3D11Texture2D::IID, texture.as_raw(), 0, 0, &mut raw) };
+        let buffer: IMFMediaBuffer = made(hr, raw, "MFCreateDXGISurfaceBuffer")?;
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: the out-pointer refers to a live local.
+        let hr = unsafe { (self.create_sample)(&mut raw) };
+        let sample: IMFSample = made(hr, raw, "MFCreateSample")?;
+        // SAFETY: the sample and DXGI surface buffer are live COM interfaces.
+        unsafe {
+            sample.AddBuffer(&buffer).map_err(|e| format!("cannot add the DXGI input buffer: {e}"))?;
+            sample.SetSampleTime(time).map_err(|e| format!("cannot timestamp the DXGI input: {e}"))?;
+        }
+        Ok(sample)
+    }
+
     /// An input sample holding a copy of `data`, timestamped `time`.
-    fn sample_of(&self, data: &[u8], time: i64) -> Result<IMFSample, String> {
+    pub(super) fn sample_of(&self, data: &[u8], time: i64) -> Result<IMFSample, String> {
         let len = u32::try_from(data.len()).map_err(|_| "sample is too large".to_string())?;
         let mut raw = std::ptr::null_mut();
         // SAFETY: the out-pointer refers to a live local.
@@ -173,6 +208,46 @@ impl MfApi {
                 }
             }
             // SAFETY: the array itself was allocated by MFTEnumEx with CoTaskMemAlloc.
+            unsafe { CoTaskMemFree(Some(list as *const c_void)) };
+        }
+        Ok(out)
+    }
+
+    pub(super) fn hardware_h264_encoders(&self) -> Result<Vec<IMFActivate>, String> {
+        const MAX_ENCODER_MFTS: u32 = 64;
+        let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
+        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: windows::Win32::Media::MediaFoundation::MFVideoFormat_H264 };
+        let flags = MFT_ENUM_FLAG(MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_ASYNCMFT.0 | MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0);
+        let (mut list, mut count) = (std::ptr::null_mut::<*mut c_void>(), 0u32);
+        // SAFETY: the media types and out-pointers refer to live locals. Hardware synchronous and
+        // asynchronous transforms are requested so supported vendor drivers can be selected.
+        let hr = unsafe {
+            (self.enum_transforms)(windows::Win32::Media::MediaFoundation::MFT_CATEGORY_VIDEO_ENCODER, flags.0 as u32, &input, &output, &mut list, &mut count)
+        };
+        if hr.is_err() {
+            return Err(format!("MFTEnumEx for hardware H.264 encoders failed ({hr:?})"));
+        }
+        if count > MAX_ENCODER_MFTS {
+            if !list.is_null() {
+                // SAFETY: MFTEnumEx allocated this array with CoTaskMemAlloc, even when its
+                // reported activation count exceeds our bounded enumeration limit.
+                unsafe { CoTaskMemFree(Some(list as *const c_void)) };
+            }
+            return Err(format!("MFTEnumEx returned too many hardware encoders ({count})"));
+        }
+        let mut out = Vec::new();
+        if !list.is_null() {
+            for i in 0..count as usize {
+                // SAFETY: MFTEnumEx allocated `count` pointers; each non-null pointer is a
+                // reference to an IMFActivate transferred to this vector.
+                unsafe {
+                    let p = *list.add(i);
+                    if !p.is_null() {
+                        out.push(IMFActivate::from_raw(p));
+                    }
+                }
+            }
+            // SAFETY: MFTEnumEx allocated the pointer array with CoTaskMemAlloc.
             unsafe { CoTaskMemFree(Some(list as *const c_void)) };
         }
         Ok(out)
@@ -413,7 +488,7 @@ pub fn describe(api: &MfApi, subtype: GUID) -> Vec<String> {
         .collect()
 }
 
-fn friendly_name(a: &IMFActivate) -> Option<String> {
+pub(super) fn friendly_name(a: &IMFActivate) -> Option<String> {
     // SAFETY: a plain COM call; `GetAllocatedString` returns a CoTaskMem string that the
     // returned `PWSTR` wrapper does not free, so it is freed here after copying.
     unsafe {

@@ -202,15 +202,20 @@ impl Pipeline {
         let renderer = if settings.gpu_rendering == GpuRendering::Off {
             None
         } else {
-            // Four renderers: as fast as one per worker (measured on 16 threads, where more only
-            // contend for memory bandwidth in the read-back), with a quarter of the GPU memory.
-            let count = rayon::current_num_threads().clamp(2, 4);
-            let mut list = Vec::with_capacity(count);
-            for _ in 0..count {
-                if let Some(r) = build_frame_renderer() {
-                    list.push(r);
-                } else {
-                    break;
+            // Four renderers are useful on discrete GPUs, but integrated adapters can share a
+            // much smaller memory budget with the CPU and decoder. Ask the first renderer for its
+            // limit before constructing the rest of the pool.
+            let requested = rayon::current_num_threads().clamp(2, 4);
+            let mut list = Vec::with_capacity(requested);
+            if let Some(first) = build_frame_renderer() {
+                let count = requested.min(first.max_concurrency().max(1));
+                list.push(first);
+                while list.len() < count {
+                    if let Some(r) = build_frame_renderer() {
+                        list.push(r);
+                    } else {
+                        break;
+                    }
                 }
             }
             RendererPool::new(list)
