@@ -85,7 +85,7 @@ egui = { version = "0.37", features = ["default_fonts", "monochrome_emoji_fonts"
 eframe = { version = "0.37", default-features = false }
 egui_kittest = "0.37"
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "b926b5c03e256c86ca10934f58d03f628810b5b7", features = ["egui"] }
-rfd = "0.17"
+rfd = "0.18"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
