@@ -31,7 +31,9 @@ use filmcraft_media::{Generator, MediaInfo};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 use serde::{Deserialize, Serialize};
 
-pub use caption::{Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, plain_text};
+pub use caption::{
+    Caption, CaptionAlign, CaptionAnchor, CaptionAnimation, CaptionFormat, CaptionStyle, CaptionTemplate, CaptionTrack, CaptionWordTiming, plain_text,
+};
 pub use effect::{EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect};
 pub use essential::{AudioType, EssentialSound};
 pub use find::{FindOp, FindQuery, FindRow, SearchBin};
@@ -2115,6 +2117,7 @@ mod tests {
             start: Tick(10),
             duration: Tick(TICKS_PER_SECOND),
             text: "Hello\n<i>world</i>".into(),
+            word_timings: Vec::new(),
             speaker: Some("Ann".into()),
             cue_id: Some("1".into()),
             settings: "line:90%".into(),

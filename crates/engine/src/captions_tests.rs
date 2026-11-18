@@ -139,6 +139,73 @@ fn caption_commands_need_tracks_and_navigate() {
 }
 
 #[test]
+fn caption_templates_apply_to_tracks_and_manual_edits_become_custom() {
+    let mut s = demo();
+    let track = s.execute("captions.newTrack", json!({})).unwrap()["track"].as_u64().unwrap();
+    for template in
+        ["classic", "color_pop", "shine", "type_on_two", "type_on_four", "word_reveal", "karaoke", "pop_word", "word_marker_box", "word_marker_underline"]
+    {
+        let applied = s.execute("captions.applyTemplate", json!({"track": track, "template": template})).unwrap();
+        let expected = if template == "type_on_four" { "type_on_two" } else { template };
+        assert_eq!(applied["template"], expected);
+        assert_eq!(s.active_sequence().unwrap().caption_tracks[0].style.template.id(), expected);
+    }
+
+    s.execute("captions.applyTemplate", json!({"track": track, "template": "type_on_two"})).unwrap();
+    let style = &s.active_sequence().unwrap().caption_tracks[0].style;
+    assert_eq!(style.animation, filmcraft_project::CaptionAnimation::TypeOnTwo);
+    assert_eq!(style.color, [255, 255, 255, 255]);
+    let path = std::env::temp_dir().join(format!("filmcraft-caption-template-{}.fcproj", std::process::id()));
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    s.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    let style = &s.active_sequence().unwrap().caption_tracks[0].style;
+    assert_eq!(style.template, filmcraft_project::CaptionTemplate::TypeOnTwo);
+    assert_eq!(style.animation, filmcraft_project::CaptionAnimation::TypeOnTwo);
+    let _ = std::fs::remove_file(path);
+
+    s.execute(
+        "captions.setStyle",
+        json!({
+            "track": track, "size": 72, "animationSpeed": 9.0, "wordsPerGroup": 9, "highlightColor": "#ff0000",
+            "maxLines": 9, "boxAlign": "right", "shadow": true, "shadowColor": "#112233",
+            "shadowBlur": 60, "shadowOffsetX": -60, "shadowOffsetY": 12,
+            "wordMarkerOpacity": 150, "wordMarkerBorderColor": "#00ff00",
+            "wordMarkerBorderWidth": 99, "wordMarkerRadius": 60
+        }),
+    )
+    .unwrap();
+    let style = &s.active_sequence().unwrap().caption_tracks[0].style;
+    assert_eq!(style.template, filmcraft_project::CaptionTemplate::Custom);
+    assert_eq!(style.animation, filmcraft_project::CaptionAnimation::TypeOnTwo);
+    assert_eq!(style.animation_speed, 4.0);
+    assert_eq!(style.words_per_group, 5);
+    assert_eq!(style.highlight_color, [255, 0, 0, 255]);
+    assert_eq!(style.max_lines, 5);
+    assert_eq!(style.box_align, filmcraft_project::CaptionAlign::Right);
+    assert!(style.shadow);
+    assert_eq!(style.shadow_color, [17, 34, 51, 255]);
+    assert_eq!(style.shadow_blur, 40.0);
+    assert_eq!(style.shadow_offset_x, -40.0);
+    assert_eq!(style.shadow_offset_y, 12.0);
+    assert_eq!(style.word_marker_opacity, 100);
+    assert_eq!(style.word_marker_border_color, [0, 255, 0, 255]);
+    assert_eq!(style.word_marker_border_width, 20.0);
+    assert_eq!(style.word_marker_radius, 40.0);
+    let listed = s.execute("captions.list", json!({"track": track})).unwrap();
+    assert_eq!(listed["tracks"][0]["style"]["wordsPerGroup"], 5);
+    assert_eq!(listed["tracks"][0]["style"]["maxLines"], 5);
+    assert_eq!(listed["tracks"][0]["style"]["boxAlign"], "right");
+    assert_eq!(listed["tracks"][0]["style"]["shadow"], true);
+    assert_eq!(listed["tracks"][0]["style"]["wordMarkerOpacity"], 100);
+    assert_eq!(listed["tracks"][0]["style"]["wordMarkerBorderColor"], "#00ff00ff");
+    assert_eq!(listed["tracks"][0]["style"]["wordMarkerBorderWidth"], 20.0);
+    assert_eq!(listed["tracks"][0]["style"]["wordMarkerRadius"], 40.0);
+    assert!(s.execute("captions.applyTemplate", json!({"track": track, "template": "missing"})).is_err());
+    s.execute("captions.setStyle", json!({"track": track, "reset": true})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().caption_tracks[0].style.template, filmcraft_project::CaptionTemplate::Classic);
+}
+
+#[test]
 fn caption_list_track_filter_never_falls_back_to_every_track() {
     let mut s = demo();
     s.execute("captions.newTrack", json!({})).unwrap();

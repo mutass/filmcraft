@@ -16,6 +16,7 @@ filmcraft-project = { workspace = true }
 filmcraft-text = { workspace = true }
 thiserror = { workspace = true }
 roxmltree = { workspace = true }
+unicode-segmentation = "1.13"
 
 [dev-dependencies]
 proptest = { workspace = true }

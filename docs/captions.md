@@ -12,10 +12,13 @@ version 2; version 1 projects open with no caption tracks).
   font size (pixels at 1080 lines, scaled to the frame), text colour, background box and its colour,
   outline width and colour, alignment (left/centre/right), position (top/middle/bottom) and
   margin (a fraction of the frame height, default 0.08; `captions.setStyle` clamps it to 0–0.45),
-  line spacing.
+  independent background-box alignment, line spacing, a 1–5 rendered-line limit (text shrinks to
+  preserve every word), optional drop shadow (colour, blur, and horizontal/vertical offsets), a
+  reusable built-in template, and its burn-in animation, animation speed, words per group (1–5),
+  and active-word highlight colour.
 - **Caption**: in/out in exact `Tick`s, text (lines separated by `\n`; `<i>`, `<b>`, `<u>` kept
-  as written), optional speaker, and the WebVTT cue id and cue settings, kept for round trips.
-  Captions on a track never overlap.
+  as written), optional speaker, optional transcript word timings relative to the cue start, and the
+  WebVTT cue id and cue settings, kept for round trips. Captions on a track never overlap.
 
 ## Files
 
@@ -51,7 +54,8 @@ Details of each format and the SCC encoder are in [`crates/captions/README.md`](
 | `edit.copy` / `edit.cut` / `edit.paste` / `edit.pasteInsert` | ⌘C / ⌘X / ⌘V / ⇧⌘V with only captions selected | captions paste at the playhead on the tracks they came from, overwriting (Paste Insert pushes later captions on); Paste places whichever of clips or captions was copied last |
 | `captions.select`, `captions.goTo` | click / number button | `captions`, `add` / `caption` |
 | `captions.setTrack` | caption track header (eye, lock) | `track`, `name`, `format`, `language`, `enabled`, `locked`, `syncLock` |
-| `captions.setStyle` | Text panel style strip | `track`, `size`, `color`, `background`, `backgroundColor`, `outline`, `outlineColor`, `align`, `anchor`, `margin`, `lineSpacing`, `reset` |
+| `captions.applyTemplate` | Text panel ▸ Captions ▸ Template | `track`, `template` (`classic`, `color_pop`, `shine`, `type_on_two`, `word_reveal`, `karaoke`, `pop_word`, `word_marker_box`, `word_marker_underline`) |
+| `captions.setStyle` | Text panel style strip | `track`, `size`, `color`, `background`, `backgroundColor`, `outline`, `outlineColor`, `align`, `anchor`, `margin`, `lineSpacing`, `animationSpeed`, `wordsPerGroup`, `highlightColor`, `wordMarkerOpacity`, `wordMarkerBorderColor`, `wordMarkerBorderWidth`, `wordMarkerRadius`, `reset` |
 | `captions.deleteTrack` | | `track` |
 | `captions.import` / `captions.export` | File ▸ Export ▸ Captions… | `path`, `format`, `track`, `dropFrame` |
 | `captions.list` | (query) | `track` — tracks, styles and captions with timecodes (a `track` that names no caption track is an error) |
@@ -71,10 +75,37 @@ also splits captions.
 - **Text panel ▸ Captions**: search, track picker (also creates tracks of each format), add /
   split / merge / delete / export buttons, the list of segments with editable in/out timecodes
   and text (committed when the field loses focus; Arabic and Hebrew show in reading order and are
-  edited in logical order while the field has focus), and the track style strip (size, colour, box,
-  alignment, position). The list keeps the caption under the playhead in view (centred as the
+  edited in logical order while the field has focus). The list keeps the caption under the playhead in view (centred as the
   playhead reaches it, not while a field is being edited). Automation ids: `text.tab.Captions`, `text.captions.add|split|merge|delete|export|search|track`,
-  `text.captions.<id>.in|out|text|goto|row`, `text.captions.style.*`.
+  `text.captions.<id>.in|out|text|goto|row`, `text.captions.style.*`, and
+  `text.captions.template[.option.<id>]`.
+- **Text panel ▸ Template**: track style, template/animation, text formatting, line limit, box
+  alignment, outline, and shadow settings. The line limit automatically reduces font size when
+  necessary rather than hiding caption text. Selecting **Word marker (box)** adds controls for its
+  fill opacity, independent border colour and width, and corner radius. Border width and radius are
+  pixels relative to a 1080-line frame and scale with sequence resolution. Automation ids:
+  `text.tab.Template`, `text.captions.style.wordMarkerOpacity`,
+  `text.captions.style.wordMarkerBorderColor`,
+  `text.captions.style.wordMarkerBorderWidth`, and
+  `text.captions.style.wordMarkerRadius`.
+- **Text panel ▸ Transcript**: the **Create captions** action opens settings for words per line,
+  words per caption, and lines per caption. The command accepts `maxWordsPerLine` and
+  `maxWordsPerCaption` for the same controls.
+
+The Template picker applies a built-in look: **Classic** (static subtitle), **Color Pop** (warm
+text that grows in), **Shine** (cool text with a moving highlight), **Type on (2 characters)**,
+**Word by word** (reveals words in groups), **Karaoke highlight** (keeps the phrase visible and
+highlights the current word group), **Pop word** (pops and highlights the current word group),
+**Word marker (box)**, and **Word marker (underline)** (a highlight-coloured shape tracks the active
+timed word). The box marker has independently adjustable fill opacity, border colour and width,
+and corner radius.
+The word-based looks use stored transcript word timings when available; imported captions without
+those timings are evenly distributed across the cue. Editing caption text or timing clears stale
+word timing, so animation falls back to even cue timing. The Template tab exposes group size, animation
+speed, and highlight colour. Speed affects fallback timing and motion, but does not retime transcript
+word boundaries. Templates are saved with the caption track and affect the Program monitor and
+burned-in video exports. SRT/WebVTT/CEA sidecar exports remain text and timing only. Manual style
+edits mark the track Custom; applying a template replaces the track style in one undoable action.
 
 ## Burn-in
 

@@ -255,6 +255,7 @@ fn caption_burn_in_h264_ffmpeg_oracle() {
         start: Tick::ZERO,
         duration: r.tick_of(24),
         text: "BURNED IN".into(),
+        word_timings: Vec::new(),
         speaker: None,
         cue_id: None,
         settings: String::new(),

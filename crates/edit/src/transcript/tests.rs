@@ -244,6 +244,8 @@ fn check_blocks(b: &[CaptionBlock], rules: &CaptionRules) {
         let lines: Vec<&str> = x.text.lines().collect();
         assert!(lines.len() <= rules.lines, "{x:?}");
         assert!(lines.iter().all(|l| l.chars().count() <= rules.max_chars), "{x:?}");
+        assert!(lines.iter().all(|l| l.split_whitespace().count() <= rules.max_words_per_line), "{x:?}");
+        assert!(lines.iter().map(|l| l.split_whitespace().count()).sum::<usize>() <= rules.max_words_per_caption, "{x:?}");
         if i > 0 {
             assert!(x.start >= b[i - 1].end + Tick(R.frame_duration().0 * rules.gap_frames), "{:?} overlaps {:?}", b[i - 1], x);
         }
@@ -258,7 +260,7 @@ fn captions_follow_line_length_speaker_and_pause_rules() {
     check_blocks(&b, &rules);
     assert_eq!(
         b.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(),
-        ["Welcome to the show.", "Um, today we talk about rivers.", "Thanks for having me. I uh love rivers,\nyou know."]
+        ["Welcome to the show.", "Um, today we talk about\nrivers.", "Thanks for having me. I\nuh love rivers, you know."]
     );
     assert_eq!((b[0].start, b[0].end), (s(0.48), s(1.72)));
     assert_eq!(b[2].speaker.as_deref(), Some("Speaker 2"));
@@ -295,4 +297,26 @@ fn captions_never_overlap_with_dense_words() {
     let rules = CaptionRules { gap_frames: 1, ..Default::default() };
     let b = caption_blocks(&words, &rules, R);
     check_blocks(&b, &rules);
+}
+
+#[test]
+fn caption_generation_limits_words_per_line_and_caption() {
+    let words: Vec<SeqWord> = (0..12)
+        .map(|i| SeqWord {
+            text: format!("word{i}"),
+            start: R.tick_of(i * 5),
+            end: R.tick_of(i * 5 + 2),
+            clip: ClipId(1),
+            item: MEDIA,
+            index: i as usize,
+            track: 0,
+            speaker: None,
+            confidence: 1.0,
+        })
+        .collect();
+    let rules = CaptionRules { max_chars: 100, max_words_per_line: 2, max_words_per_caption: 3, lines: 2, ..Default::default() };
+    let blocks = caption_blocks(&words, &rules, R);
+    check_blocks(&blocks, &rules);
+    assert_eq!(blocks.iter().map(|block| block.words.len()).collect::<Vec<_>>(), [3, 3, 3, 3]);
+    assert_eq!(blocks[0].text, "word0 word1\nword2");
 }

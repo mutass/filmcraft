@@ -182,7 +182,26 @@ fn remove_fillers_pauses_and_create_captions() {
     let tr = &q.caption_tracks[0];
     assert_eq!(tr.captions[0].text, "Hello world.");
     assert_eq!(tr.captions[1].speaker.as_deref(), Some("Speaker 2"));
+    let words = crate::transcript::sequence_words(&s);
+    assert_eq!(tr.captions[0].word_timings.len(), 2);
+    for (timing, word) in tr.captions[0].word_timings.iter().zip(words.iter().take(2)) {
+        assert_eq!(timing.start.0, word.start.0.saturating_sub(tr.captions[0].start.0).clamp(0, tr.captions[0].duration.0));
+        assert_eq!(timing.end.0, word.end.0.saturating_sub(tr.captions[0].start.0).clamp(timing.start.0, tr.captions[0].duration.0));
+    }
     q.check().unwrap();
+}
+
+#[test]
+fn create_captions_honours_word_counts_per_line_and_caption() {
+    let (mut s, item, _) = session();
+    s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    let result = s.execute("transcript.createCaptions", json!({"maxWordsPerLine": 1, "maxWordsPerCaption": 2, "lines": 2, "minSeconds": 0.1})).unwrap();
+    assert_eq!(result["captions"], 4, "{result}");
+    let track = &s.active_sequence().unwrap().caption_tracks[0];
+    assert_eq!(track.captions[0].text, "Hello\num");
+    assert_eq!(track.captions[0].word_timings.len(), 2);
+    assert!(track.captions.iter().all(|caption| caption.text.lines().all(|line| line.split_whitespace().count() <= 1)));
+    assert!(track.captions.iter().all(|caption| caption.word_timings.len() <= 2));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Headless UI test of the caption track font picker in the Text panel's Captions tab: picking a
+//! Headless UI test of the caption track font picker in the Text panel's Template tab: picking a
 //! family sets the track style's font, and macOS-private (`.`-prefixed) faces are not offered.
 
 use std::sync::mpsc::{Sender, channel};
@@ -68,7 +68,7 @@ fn caption_font_picker_sets_the_track_font() {
     let track = d.ok("engine.execute", json!({"command": "captions.newTrack", "params": {"format": "Subtitle"}}))["track"].as_u64().unwrap();
     d.ok("engine.execute", json!({"command": "captions.add", "params": {"track": track, "text": "Hello", "seconds": 1.0}}));
     d.frames(2);
-    d.ok("ui.click", json!({"id": "text.tab.Captions"}));
+    d.ok("ui.click", json!({"id": "text.tab.Template"}));
     d.frames(3);
     assert_eq!(d.font(track), "Inter");
 
@@ -92,6 +92,44 @@ fn caption_font_picker_sets_the_track_font() {
     d.ok("ui.click", json!({"id": serif}));
     d.frames(3);
     assert_eq!(d.font(track), "Noto Serif");
+}
+
+#[test]
+fn caption_template_picker_applies_a_reusable_animated_style() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Captions and Graphics"}));
+    let track = d.ok("engine.execute", json!({"command": "captions.newTrack", "params": {"format": "Subtitle"}}))["track"].as_u64().unwrap();
+    d.ok("engine.execute", json!({"command": "captions.add", "params": {"track": track, "text": "Hello world", "seconds": 1.0}}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "text.tab.Template"}));
+    d.frames(3);
+
+    assert!(d.ids("text.captions.template").iter().any(|id| id == "text.captions.template"));
+    d.ok("ui.click", json!({"id": "text.captions.template"}));
+    d.frames(2);
+    assert!(d.ids("text.captions.template.option.").iter().any(|id| id == "text.captions.template.option.shine"));
+    assert!(d.ids("text.captions.template.option.").iter().any(|id| id == "text.captions.template.option.karaoke"));
+    assert!(d.ids("text.captions.template.option.").iter().any(|id| id == "text.captions.template.option.word_marker_box"));
+    assert!(d.ids("text.captions.template.option.").iter().any(|id| id == "text.captions.template.option.word_marker_underline"));
+    d.ok("ui.click", json!({"id": "text.captions.template.option.shine"}));
+    d.frames(3);
+
+    let listed = d.ok("engine.execute", json!({"command": "captions.list", "params": {"track": track}}));
+    assert_eq!(listed["tracks"][0]["style"]["template"], "shine");
+    assert_eq!(listed["tracks"][0]["style"]["animation"], "shine");
+    assert_eq!(listed["tracks"][0]["style"]["color"], "#b0ecffff");
+    for id in ["wordsPerGroup", "animationSpeed", "highlightColor", "maxLines", "boxAlign.center", "shadow", "shadowBlur", "shadowOffsetX", "shadowOffsetY"] {
+        assert!(d.ids(&format!("text.captions.style.{id}")).iter().any(|element| element == &format!("text.captions.style.{id}")));
+    }
+
+    d.ok("ui.click", json!({"id": "text.captions.template"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "text.captions.template.option.word_marker_box"}));
+    d.frames(3);
+    for id in ["wordMarkerOpacity", "wordMarkerBorderColor", "wordMarkerBorderWidth", "wordMarkerRadius"] {
+        let automation_id = format!("text.captions.style.{id}");
+        assert!(d.ids(&automation_id).iter().any(|element| element == &automation_id));
+    }
 }
 
 /// Every text shape on screen, with the colour of its first run.

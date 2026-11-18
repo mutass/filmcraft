@@ -601,8 +601,10 @@ fn create_captions(s: &mut Session, p: &Value) -> Result<Value> {
     let words = sequence_words(s);
     let d = CaptionRules::default();
     let rules = CaptionRules {
-        max_chars: u64_p(p, "maxChars").map(|n| n as usize).unwrap_or(d.max_chars),
-        lines: u64_p(p, "lines").map(|n| n as usize).unwrap_or(d.lines),
+        max_chars: u64_p(p, "maxChars").map(|n| n.clamp(1, 200) as usize).unwrap_or(d.max_chars),
+        max_words_per_line: u64_p(p, "maxWordsPerLine").map(|n| n.clamp(1, 20) as usize).unwrap_or(d.max_words_per_line),
+        max_words_per_caption: u64_p(p, "maxWordsPerCaption").map(|n| n.clamp(1, 40) as usize).unwrap_or(d.max_words_per_caption),
+        lines: u64_p(p, "lines").map(|n| n.clamp(1, 5) as usize).unwrap_or(d.lines),
         min_duration: f64_p(p, "minSeconds").map(Tick::from_seconds_f64).unwrap_or(d.min_duration),
         max_duration: f64_p(p, "maxSeconds").map(Tick::from_seconds_f64).unwrap_or(d.max_duration),
         gap_frames: p.get("gapFrames").and_then(Value::as_i64).unwrap_or(d.gap_frames),
@@ -615,7 +617,7 @@ fn create_captions(s: &mut Session, p: &Value) -> Result<Value> {
     let tid = s.edit_sequence("Create Captions", |q, ctx, st| {
         let tid = TrackId(ctx.alloc());
         let mut t = CaptionTrack::new(tid, name, format);
-        t.captions = tx::blocks_to_captions(&blocks, ctx);
+        t.captions = tx::blocks_to_captions(&blocks, &words, ctx);
         q.caption_tracks.insert(0, t);
         st.caption_selection.clear();
         Ok(tid)
@@ -706,7 +708,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "transcript.createCaptions",
             "Create Captions from Transcript…",
             &["Sequence", "Transcript"],
-            r#"{"maxChars":n?,"lines":1|2?,"minSeconds":f?,"maxSeconds":f?,"gapFrames":n?,"format":str?,"name":str?}"#,
+            r#"{"maxChars":n?,"maxWordsPerLine":1..20?,"maxWordsPerCaption":1..40?,"lines":1..5?,"minSeconds":f?,"maxSeconds":f?,"gapFrames":n?,"format":str?,"name":str?}"#,
             has_transcript,
             create_captions,
             true,

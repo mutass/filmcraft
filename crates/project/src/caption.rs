@@ -70,10 +70,186 @@ pub enum CaptionAnchor {
     Bottom,
 }
 
+/// Built-in caption looks, selected on a caption track and saved with the project.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionTemplate {
+    #[default]
+    Classic,
+    ColorPop,
+    Shine,
+    #[serde(alias = "type_on_four")]
+    TypeOnTwo,
+    WordReveal,
+    Karaoke,
+    PopWord,
+    WordMarkerBox,
+    WordMarkerUnderline,
+    Custom,
+}
+
+impl CaptionTemplate {
+    pub const BUILT_IN: [Self; 9] = [
+        Self::Classic,
+        Self::ColorPop,
+        Self::Shine,
+        Self::TypeOnTwo,
+        Self::WordReveal,
+        Self::Karaoke,
+        Self::PopWord,
+        Self::WordMarkerBox,
+        Self::WordMarkerUnderline,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::ColorPop => "color_pop",
+            Self::Shine => "shine",
+            Self::TypeOnTwo => "type_on_two",
+            Self::WordReveal => "word_reveal",
+            Self::Karaoke => "karaoke",
+            Self::PopWord => "pop_word",
+            Self::WordMarkerBox => "word_marker_box",
+            Self::WordMarkerUnderline => "word_marker_underline",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::ColorPop => "Color Pop",
+            Self::Shine => "Shine",
+            Self::TypeOnTwo => "Type on (2 characters)",
+            Self::WordReveal => "Word by word",
+            Self::Karaoke => "Karaoke highlight",
+            Self::PopWord => "Pop word",
+            Self::WordMarkerBox => "Word marker (box)",
+            Self::WordMarkerUnderline => "Word marker (underline)",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::BUILT_IN
+            .into_iter()
+            .find(|template| template.id().eq_ignore_ascii_case(name) || template.label().eq_ignore_ascii_case(name))
+            .or_else(|| name.eq_ignore_ascii_case("type_on_four").then_some(Self::TypeOnTwo))
+    }
+
+    /// The look and animation for this built-in template.
+    pub fn style(self) -> CaptionStyle {
+        let mut style = CaptionStyle { template: self, ..CaptionStyle::default() };
+        match self {
+            Self::Classic => {}
+            Self::ColorPop => {
+                style.color = [255, 224, 112, 255];
+                style.background_color = [20, 25, 70, 224];
+                style.outline = 1.5;
+                style.outline_color = [18, 30, 78, 255];
+                style.animation = CaptionAnimation::Grow;
+            }
+            Self::Shine => {
+                style.color = [176, 236, 255, 255];
+                style.background = false;
+                style.outline = 2.0;
+                style.outline_color = [10, 48, 86, 255];
+                style.animation = CaptionAnimation::Shine;
+            }
+            Self::TypeOnTwo => {
+                style.color = [255, 255, 255, 255];
+                style.background_color = [12, 45, 80, 224];
+                style.animation = CaptionAnimation::TypeOnTwo;
+            }
+            Self::WordReveal => {
+                style.color = [255, 255, 255, 255];
+                style.animation = CaptionAnimation::WordReveal;
+            }
+            Self::Karaoke => {
+                style.color = [255, 255, 255, 255];
+                style.background = false;
+                style.outline = 1.5;
+                style.outline_color = [12, 28, 48, 255];
+                style.animation = CaptionAnimation::Karaoke;
+            }
+            Self::PopWord => {
+                style.color = [255, 255, 255, 255];
+                style.animation = CaptionAnimation::PopWord;
+            }
+            Self::WordMarkerBox => {
+                style.color = [255, 255, 255, 255];
+                style.animation = CaptionAnimation::WordMarkerBox;
+                style.background = false;
+            }
+            Self::WordMarkerUnderline => {
+                style.color = [255, 255, 255, 255];
+                style.animation = CaptionAnimation::WordMarkerUnderline;
+                style.background = false;
+            }
+            Self::Custom => {}
+        }
+        style
+    }
+}
+
+/// Per-caption animation used by burn-in rendering. Caption sidecar exports remain text-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptionAnimation {
+    #[default]
+    None,
+    Grow,
+    Shine,
+    #[serde(alias = "type_on_four")]
+    TypeOnTwo,
+    WordReveal,
+    Karaoke,
+    PopWord,
+    WordMarkerBox,
+    WordMarkerUnderline,
+}
+
+impl CaptionAnimation {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Grow => "grow",
+            Self::Shine => "shine",
+            Self::TypeOnTwo => "type_on_two",
+            Self::WordReveal => "word_reveal",
+            Self::Karaoke => "karaoke",
+            Self::PopWord => "pop_word",
+            Self::WordMarkerBox => "word_marker_box",
+            Self::WordMarkerUnderline => "word_marker_underline",
+        }
+    }
+}
+
 /// Track-level caption style (Premiere's caption track style / Essential Graphics text settings).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptionStyle {
+    /// The selected built-in look, or `Custom` after manually changing style properties.
+    pub template: CaptionTemplate,
+    /// Burn-in animation; ignored by caption sidecar export.
+    pub animation: CaptionAnimation,
+    /// Animation rate multiplier. Transcript-synced word boundaries are not retimed.
+    pub animation_speed: f32,
+    /// Number of words revealed or highlighted together (1–5).
+    pub words_per_group: u8,
+    /// Word-marker box fill opacity as a percentage (0–100).
+    pub word_marker_opacity: u8,
+    /// Word-marker box border colour, sRGB + alpha.
+    pub word_marker_border_color: [u8; 4],
+    /// Word-marker box border width in pixels at 1080-line frame height.
+    pub word_marker_border_width: f32,
+    /// Word-marker box corner radius in pixels at 1080-line frame height.
+    pub word_marker_radius: f32,
+    /// Maximum rendered lines; text size is reduced as needed so all caption text remains visible (1–5).
+    pub max_lines: u8,
+    /// Highlight colour for karaoke and pop-word animations.
+    pub highlight_color: [u8; 4],
     /// Font family name (bundled, craft-fonts or system); unknown or empty names fall back to Inter.
     pub font: String,
     /// Font size in pixels for a 1080-line frame (scaled with the frame height).
@@ -84,6 +260,8 @@ pub struct CaptionStyle {
     pub background: bool,
     /// Background box colour, sRGB + alpha.
     pub background_color: [u8; 4],
+    /// Horizontal alignment of the background box, independent from text alignment.
+    pub box_align: CaptionAlign,
     pub align: CaptionAlign,
     pub anchor: CaptionAnchor,
     /// Distance from the anchored frame edge, as a fraction of the frame height.
@@ -93,24 +271,57 @@ pub struct CaptionStyle {
     /// Text outline width in pixels at 1080 lines (0 = none).
     pub outline: f32,
     pub outline_color: [u8; 4],
+    /// Draw a soft shadow behind the caption and its background box.
+    pub shadow: bool,
+    /// Shadow colour, sRGB + alpha.
+    pub shadow_color: [u8; 4],
+    /// Shadow blur radius in pixels at 1080-line frame height.
+    pub shadow_blur: f32,
+    /// Horizontal shadow offset in pixels at 1080-line frame height.
+    pub shadow_offset_x: f32,
+    /// Vertical shadow offset in pixels at 1080-line frame height.
+    pub shadow_offset_y: f32,
 }
 
 impl Default for CaptionStyle {
     fn default() -> Self {
         Self {
+            template: CaptionTemplate::Classic,
+            animation: CaptionAnimation::None,
+            animation_speed: 1.0,
+            words_per_group: 1,
+            word_marker_opacity: 38,
+            word_marker_border_color: [255, 208, 64, 255],
+            word_marker_border_width: 0.0,
+            word_marker_radius: 5.5,
+            max_lines: 2,
+            highlight_color: [255, 208, 64, 255],
             font: "Inter".into(),
             size: 54.0,
             color: [255, 255, 255, 255],
             background: true,
             background_color: [0, 0, 0, 191],
+            box_align: CaptionAlign::Center,
             align: CaptionAlign::Center,
             anchor: CaptionAnchor::Bottom,
             margin: 0.08,
             line_spacing: 1.25,
             outline: 0.0,
             outline_color: [0, 0, 0, 255],
+            shadow: false,
+            shadow_color: [0, 0, 0, 200],
+            shadow_blur: 8.0,
+            shadow_offset_x: 0.0,
+            shadow_offset_y: 4.0,
         }
     }
+}
+
+/// One transcript word's timing relative to the caption's start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionWordTiming {
+    pub start: Tick,
+    pub end: Tick,
 }
 
 /// One caption block on a caption track.
@@ -122,6 +333,9 @@ pub struct Caption {
     pub duration: Tick,
     /// Caption text; lines separated by `\n`.
     pub text: String,
+    /// Optional transcript word timings relative to `start`; empty for imported or edited captions.
+    #[serde(default)]
+    pub word_timings: Vec<CaptionWordTiming>,
     /// Speaker name (WebVTT `<v Name>` voice span).
     #[serde(default)]
     pub speaker: Option<String>,
@@ -328,6 +542,7 @@ mod tests {
                 start: Tick(*s),
                 duration: Tick(50),
                 text: format!("c{i}"),
+                word_timings: Vec::new(),
                 speaker: None,
                 cue_id: None,
                 settings: String::new(),
@@ -341,6 +556,59 @@ mod tests {
     }
 
     #[test]
+    fn previous_type_on_four_values_load_as_two_character_template() {
+        assert_eq!(CaptionTemplate::from_name("type_on_four"), Some(CaptionTemplate::TypeOnTwo));
+        assert_eq!(serde_json::from_str::<CaptionTemplate>(r#""type_on_four""#).expect("legacy template parses"), CaptionTemplate::TypeOnTwo);
+        assert_eq!(serde_json::from_str::<CaptionAnimation>(r#""type_on_four""#).expect("legacy animation parses"), CaptionAnimation::TypeOnTwo);
+    }
+
+    #[test]
+    fn older_caption_data_defaults_new_word_animation_fields() {
+        let caption = Caption {
+            id: ClipId(1),
+            start: Tick::ZERO,
+            duration: Tick(100),
+            text: "hello".into(),
+            word_timings: Vec::new(),
+            speaker: None,
+            cue_id: None,
+            settings: String::new(),
+        };
+        let mut caption_json = serde_json::to_value(caption).expect("serialize caption");
+        caption_json.as_object_mut().expect("caption object").remove("word_timings");
+        let caption: Caption = serde_json::from_value(caption_json).expect("legacy caption loads");
+        assert!(caption.word_timings.is_empty());
+
+        let mut style_json = serde_json::to_value(CaptionStyle::default()).expect("serialize style");
+        let style_map = style_json.as_object_mut().expect("style object");
+        style_map.remove("animation_speed");
+        style_map.remove("words_per_group");
+        style_map.remove("word_marker_opacity");
+        style_map.remove("word_marker_border_color");
+        style_map.remove("word_marker_border_width");
+        style_map.remove("word_marker_radius");
+        style_map.remove("max_lines");
+        style_map.remove("highlight_color");
+        style_map.remove("box_align");
+        style_map.remove("shadow");
+        style_map.remove("shadow_color");
+        style_map.remove("shadow_blur");
+        style_map.remove("shadow_offset_x");
+        style_map.remove("shadow_offset_y");
+        let style: CaptionStyle = serde_json::from_value(style_json).expect("legacy style loads");
+        assert_eq!(style.animation_speed, 1.0);
+        assert_eq!(style.words_per_group, 1);
+        assert_eq!(style.word_marker_opacity, 38);
+        assert_eq!(style.word_marker_border_color, [255, 208, 64, 255]);
+        assert_eq!(style.word_marker_border_width, 0.0);
+        assert_eq!(style.word_marker_radius, 5.5);
+        assert_eq!(style.max_lines, 2);
+        assert_eq!(style.highlight_color, [255, 208, 64, 255]);
+        assert_eq!(style.box_align, CaptionAlign::Center);
+        assert!(!style.shadow);
+    }
+
+    #[test]
     fn corrupt_caption_times_do_not_overflow_the_overlap_check() {
         let mut track = CaptionTrack::new(TrackId(1), "Subtitles".into(), CaptionFormat::Subtitle);
         for (id, start) in [(1, i64::MAX), (2, 10)] {
@@ -349,6 +617,7 @@ mod tests {
                 start: Tick(start),
                 duration: Tick(50),
                 text: String::new(),
+                word_timings: Vec::new(),
                 speaker: None,
                 cue_id: None,
                 settings: String::new(),

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use filmcraft_captions::{Document, Format, WriteOptions};
 use filmcraft_edit as edit;
 use filmcraft_edit::Edge;
-use filmcraft_project::{CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, ClipId, SequenceSettings, TrackId};
+use filmcraft_project::{CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTemplate, CaptionTrack, ClipId, SequenceSettings, TrackId};
 use filmcraft_time::{Tick, TimeDisplay, format_time};
 
 use crate::commands::{CommandSpec, always, bad, bool_p, f64_p, has_seq, str_p, time_p, u64_p};
@@ -246,8 +246,16 @@ fn track_json(s: &Session, t: &CaptionTrack, index: usize) -> Value {
         "style": {
             "font": t.style.font, "size": t.style.size, "color": hex(t.style.color),
             "background": t.style.background, "backgroundColor": hex(t.style.background_color),
-            "align": format!("{:?}", t.style.align).to_lowercase(), "anchor": format!("{:?}", t.style.anchor).to_lowercase(),
+            "align": format!("{:?}", t.style.align).to_lowercase(),
+            "boxAlign": format!("{:?}", t.style.box_align).to_lowercase(), "anchor": format!("{:?}", t.style.anchor).to_lowercase(),
             "margin": t.style.margin, "lineSpacing": t.style.line_spacing, "outline": t.style.outline, "outlineColor": hex(t.style.outline_color),
+            "maxLines": t.style.max_lines, "shadow": t.style.shadow, "shadowColor": hex(t.style.shadow_color),
+            "shadowBlur": t.style.shadow_blur, "shadowOffsetX": t.style.shadow_offset_x, "shadowOffsetY": t.style.shadow_offset_y,
+            "template": t.style.template.id(), "animation": t.style.animation.id(),
+            "animationSpeed": t.style.animation_speed, "wordsPerGroup": t.style.words_per_group,
+            "highlightColor": hex(t.style.highlight_color), "wordMarkerOpacity": t.style.word_marker_opacity,
+            "wordMarkerBorderColor": hex(t.style.word_marker_border_color), "wordMarkerBorderWidth": t.style.word_marker_border_width,
+            "wordMarkerRadius": t.style.word_marker_radius,
         },
         "captions": t.captions.iter().map(|c| caption_json(s, c)).collect::<Vec<_>>(),
     })
@@ -348,11 +356,31 @@ pub fn commands() -> Vec<CommandSpec> {
             },
         ),
         spec(
+            "captions.applyTemplate",
+            "Apply Caption Template",
+            &[],
+            None,
+            r#"{"track":id|"C1"?,"template":"classic|color_pop|shine|type_on_two|word_reveal|karaoke|pop_word"}"#,
+            has_caption_track,
+            |s, p| {
+                let tid = track_param(s, p).ok_or_else(|| bad("captions.applyTemplate", "no such caption track"))?;
+                let name = str_p(p, "template").ok_or_else(|| bad("captions.applyTemplate", "need `template`"))?;
+                let template = CaptionTemplate::from_name(name).ok_or_else(|| bad("captions.applyTemplate", format!("unknown caption template `{name}`")))?;
+                s.edit("Apply Caption Template", |pr, st| {
+                    let seq = st.active_sequence.ok_or(EngineError::NoSequence)?;
+                    let track = pr.sequence_mut(seq).and_then(|q| q.caption_track_mut(tid)).ok_or(EngineError::NoSequence)?;
+                    track.style = template.style();
+                    Ok(())
+                })?;
+                Ok(json!({"track": tid.0, "template": template.id()}))
+            },
+        ),
+        spec(
             "captions.setStyle",
             "Caption Track Style",
             &[],
             None,
-            r##"{"track":id|"C1","font":str?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"lineSpacing":f32?,"outline":f32?,"outlineColor":str?,"reset":bool?}"##,
+            r##"{"track":id|"C1","font":str?,"size":f32?,"color":"#rrggbb[aa]"?,"background":bool?,"backgroundColor":"#rrggbbaa"?,"align":"left|center|right"?,"boxAlign":"left|center|right"?,"anchor":"top|middle|bottom"?,"margin":0..0.45 (fraction of frame height)?,"lineSpacing":f32?,"maxLines":1..5?,"outline":f32?,"outlineColor":str?,"shadow":bool?,"shadowColor":"#rrggbb[aa]"?,"shadowBlur":0..40?,"shadowOffsetX/Y":-40..40?,"animationSpeed":0.25..4,"wordsPerGroup":1..5,"highlightColor":"#rrggbb[aa]"?,"wordMarkerOpacity":0..100?,"wordMarkerBorderColor":"#rrggbb[aa]"?,"wordMarkerBorderWidth":0..20?,"wordMarkerRadius":0..40?,"reset":bool?}"##,
             has_caption_track,
             |s, p| {
                 let tid = track_param(s, p).ok_or_else(|| {
@@ -369,8 +397,41 @@ pub fn commands() -> Vec<CommandSpec> {
                     let seq = st.active_sequence.ok_or(EngineError::NoSequence)?;
                     let t = pr.sequence_mut(seq).and_then(|q| q.caption_track_mut(tid)).ok_or(EngineError::NoSequence)?;
                     let y = &mut t.style;
-                    if bool_p(&p, "reset").unwrap_or(false) {
+                    let reset = bool_p(&p, "reset").unwrap_or(false);
+                    if reset {
                         *y = CaptionStyle::default();
+                    }
+                    let customized = [
+                        "font",
+                        "size",
+                        "color",
+                        "background",
+                        "backgroundColor",
+                        "boxAlign",
+                        "outlineColor",
+                        "outline",
+                        "maxLines",
+                        "shadow",
+                        "shadowColor",
+                        "shadowBlur",
+                        "shadowOffsetX",
+                        "shadowOffsetY",
+                        "margin",
+                        "lineSpacing",
+                        "align",
+                        "anchor",
+                        "animationSpeed",
+                        "wordsPerGroup",
+                        "highlightColor",
+                        "wordMarkerOpacity",
+                        "wordMarkerBorderColor",
+                        "wordMarkerBorderWidth",
+                        "wordMarkerRadius",
+                    ]
+                    .iter()
+                    .any(|key| p.get(key).is_some());
+                    if customized {
+                        y.template = CaptionTemplate::Custom;
                     }
                     if let Some(v) = str_p(&p, "font") {
                         y.font = v.to_string();
@@ -381,11 +442,23 @@ pub fn commands() -> Vec<CommandSpec> {
                     if let Some(c) = p.get("color").and_then(parse_color) {
                         y.color = c;
                     }
+                    if let Some(c) = p.get("highlightColor").and_then(parse_color) {
+                        y.highlight_color = c;
+                    }
+                    if let Some(c) = p.get("wordMarkerBorderColor").and_then(parse_color) {
+                        y.word_marker_border_color = c;
+                    }
                     if let Some(b) = bool_p(&p, "background") {
                         y.background = b;
                     }
                     if let Some(c) = p.get("backgroundColor").and_then(parse_color) {
                         y.background_color = c;
+                    }
+                    if let Some(b) = bool_p(&p, "shadow") {
+                        y.shadow = b;
+                    }
+                    if let Some(c) = p.get("shadowColor").and_then(parse_color) {
+                        y.shadow_color = c;
                     }
                     if let Some(c) = p.get("outlineColor").and_then(parse_color) {
                         y.outline_color = c;
@@ -399,11 +472,45 @@ pub fn commands() -> Vec<CommandSpec> {
                     if let Some(v) = f64_p(&p, "lineSpacing") {
                         y.line_spacing = (v as f32).clamp(0.8, 4.0);
                     }
+                    if let Some(v) = u64_p(&p, "maxLines") {
+                        y.max_lines = v.clamp(1, 5) as u8;
+                    }
+                    if let Some(v) = f64_p(&p, "shadowBlur").filter(|v| v.is_finite()) {
+                        y.shadow_blur = (v as f32).clamp(0.0, 40.0);
+                    }
+                    if let Some(v) = f64_p(&p, "shadowOffsetX").filter(|v| v.is_finite()) {
+                        y.shadow_offset_x = (v as f32).clamp(-40.0, 40.0);
+                    }
+                    if let Some(v) = f64_p(&p, "shadowOffsetY").filter(|v| v.is_finite()) {
+                        y.shadow_offset_y = (v as f32).clamp(-40.0, 40.0);
+                    }
+                    if let Some(v) = f64_p(&p, "animationSpeed") {
+                        y.animation_speed = if v.is_finite() { (v as f32).clamp(0.25, 4.0) } else { 1.0 };
+                    }
+                    if let Some(v) = u64_p(&p, "wordsPerGroup") {
+                        y.words_per_group = v.clamp(1, 5) as u8;
+                    }
+                    if let Some(v) = u64_p(&p, "wordMarkerOpacity") {
+                        y.word_marker_opacity = v.min(100) as u8;
+                    }
+                    if let Some(v) = f64_p(&p, "wordMarkerBorderWidth").filter(|v| v.is_finite()) {
+                        y.word_marker_border_width = (v as f32).clamp(0.0, 20.0);
+                    }
+                    if let Some(v) = f64_p(&p, "wordMarkerRadius").filter(|v| v.is_finite()) {
+                        y.word_marker_radius = (v as f32).clamp(0.0, 40.0);
+                    }
                     match str_p(&p, "align") {
                         Some("left") => y.align = CaptionAlign::Left,
                         Some("right") => y.align = CaptionAlign::Right,
                         Some("center") => y.align = CaptionAlign::Center,
                         Some(o) => return Err(bad("captions.setStyle", format!("unknown align `{o}`"))),
+                        None => {}
+                    }
+                    match str_p(&p, "boxAlign") {
+                        Some("left") => y.box_align = CaptionAlign::Left,
+                        Some("right") => y.box_align = CaptionAlign::Right,
+                        Some("center") => y.box_align = CaptionAlign::Center,
+                        Some(o) => return Err(bad("captions.setStyle", format!("unknown box alignment `{o}`"))),
                         None => {}
                     }
                     match str_p(&p, "anchor") {

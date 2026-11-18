@@ -1,14 +1,14 @@
-//! The Text panel: Transcript / Captions / Graphics tabs. The Graphics tab lists the text of every
+//! The Text panel: Transcript / Captions / Template / Graphics tabs. The Graphics tab lists the text of every
 //! text layer in the sequence's graphics (#1487), with a search; clicking an entry goes to its clip
 //! and selects the layer, and the text edits in place (`graphics.set`). The Captions tab lists the caption
 //! segments of a caption track with editable in/out timecodes and text, a toolbar (add, split,
-//! merge, delete), track choice and the track style. Every edit dispatches a `captions.*` engine
+//! merge, delete), and track choice. Every edit dispatches a `captions.*` engine
 //! command; every widget registers an automation id (`text.*`). The Transcript tab shows the
 //! sequence transcript as speaker paragraphs of clickable words (click, Shift+click to extend);
 //! the selection marks In/Out and can be extracted or lifted (`transcript.*` commands).
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use filmcraft_project::{CaptionAlign, CaptionAnchor, CaptionFormat};
+use filmcraft_project::{CaptionAlign, CaptionAnchor, CaptionFormat, CaptionTemplate};
 use filmcraft_time::{TimeDisplay, format_time};
 use serde_json::{Value, json};
 
@@ -16,7 +16,7 @@ use crate::FilmcraftApp;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 
-const TABS: [&str; 3] = ["Transcript", "Captions", "Graphics"];
+const TABS: [&str; 4] = ["Transcript", "Captions", "Template", "Graphics"];
 
 /// The width a tab label needs: 7 px per character, which the strip was laid out with for Latin
 /// text, or the label as drawn if that is wider (Japanese glyphs are about twice as wide, and a
@@ -58,8 +58,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let body = Rect::from_min_max(pos2(rect.min.x, rect.min.y + 34.0), rect.max);
     match app.ui.text_tab.as_str() {
         "Captions" => captions(app, ui, body),
+        "Template" => caption_templates(app, ui, body),
         "Transcript" => transcript(app, ui, body),
-        _ => graphics(app, ui, body),
+        "Graphics" => graphics(app, ui, body),
+        _ => captions(app, ui, body),
     }
 }
 
@@ -167,13 +169,8 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         x += 28.0;
     }
 
-    // ---- style strip
-    let style_h = 30.0;
-    let style_rect = Rect::from_min_max(pos2(rect.min.x + 10.0, rect.max.y - style_h), pos2(rect.max.x - 10.0, rect.max.y - 2.0));
-    style_strip(app, ui, style_rect, track_idx, &mut actions);
-
     // ---- segment list
-    let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 8.0), pos2(rect.max.x - 6.0, style_rect.min.y - 6.0));
+    let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 8.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
     ui.painter().rect_filled(list, 3.0, t.app_bg);
     let q = app.ui.caption_search.to_lowercase();
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list.shrink(4.0)).id_salt("caption-list"));
@@ -297,6 +294,47 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             );
         }
     });
+    run(app, ui, actions);
+}
+
+fn caption_templates(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    let t = app.tokens;
+    let project = app.session.project.clone();
+    let Some(seq) = app.session.state.active_sequence.and_then(|id| project.sequence(id)) else {
+        crate::dock::placeholder(ui, rect, &t, tl!("Open a sequence to adjust caption styles"));
+        return;
+    };
+    if seq.caption_tracks.is_empty() {
+        let c = rect.center();
+        ui.painter().text(c - vec2(0.0, 20.0), Align2::CENTER_CENTER, tl!("Create a caption track to edit its template"), Tokens::ui(12.0), t.text_dim);
+        let r = Rect::from_center_size(c + vec2(0.0, 12.0), vec2(190.0, 26.0));
+        let resp = ui.put(r, egui::Button::new(tl!("Create caption track")));
+        app.auto.add("text.template.newTrack", resp.rect, "Create caption track");
+        if resp.clicked() {
+            run(app, ui, vec![("captions.newTrack".into(), json!({}))]);
+        }
+        return;
+    }
+
+    let mut track_idx =
+        app.session.state.caption_selection.first().and_then(|id| seq.caption_tracks.iter().position(|tr| tr.caption(*id).is_some())).unwrap_or(0);
+    track_idx = ui.ctx().data(|d| d.get_temp::<usize>(egui::Id::unique("text-cap-track"))).filter(|i| *i < seq.caption_tracks.len()).unwrap_or(track_idx);
+
+    let mut actions = Vec::new();
+    let bar = Rect::from_min_size(rect.min + vec2(10.0, 2.0), vec2(rect.width() - 20.0, 28.0));
+    let label = format!("C{} · {}", track_idx + 1, seq.caption_tracks[track_idx].name);
+    let picker = crate::widgets::dropdown_text(ui, Rect::from_min_size(bar.min, vec2(210.0, 24.0)), &label, &t, egui::Id::unique("text-template-track-picker"));
+    app.auto.add("text.captions.track", picker.rect, "Caption track");
+    egui::Popup::menu(&picker).show(|ui| {
+        for (i, tr) in seq.caption_tracks.iter().enumerate() {
+            if ui.selectable_label(i == track_idx, format!("C{} · {} ({})", i + 1, tr.name, crate::i18n::t(tr.format.label()))).clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("text-cap-track"), i));
+            }
+        }
+    });
+
+    let style_rect = Rect::from_min_max(pos2(rect.min.x + 8.0, bar.max.y + 4.0), pos2(rect.max.x - 8.0, rect.max.y - 4.0));
+    style_strip(app, ui, style_rect, track_idx, &mut actions);
     run(app, ui, actions);
 }
 
@@ -599,10 +637,15 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             if cmd.ends_with("extract") || cmd.ends_with("lift") {
                 app.ui.transcript_sel = None;
             }
-            actions.push((cmd.into(), params));
+            if cmd == "transcript.createCaptions" {
+                ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("transcript-caption-settings-open"), true));
+            } else {
+                actions.push((cmd.into(), params));
+            }
         }
         x += 28.0;
     }
+    caption_generation_dialog(app, ui, &mut actions);
 
     // ---- paragraphs of words
     let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 8.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
@@ -651,6 +694,80 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     run(app, ui, actions);
 }
 
+#[derive(Clone, Copy)]
+struct CaptionGenerationSettings {
+    words_per_line: u8,
+    words_per_caption: u8,
+    lines: u8,
+}
+
+impl Default for CaptionGenerationSettings {
+    fn default() -> Self {
+        Self { words_per_line: 5, words_per_caption: 10, lines: 2 }
+    }
+}
+
+fn caption_generation_dialog(app: &mut FilmcraftApp, ui: &egui::Ui, actions: &mut Vec<(String, Value)>) {
+    let open_id = egui::Id::unique("transcript-caption-settings-open");
+    let settings_id = egui::Id::unique("transcript-caption-settings");
+    let mut open = ui.ctx().data(|data| data.get_temp::<bool>(open_id)).unwrap_or(false);
+    if !open {
+        return;
+    }
+    let mut settings = ui.ctx().data(|data| data.get_temp::<CaptionGenerationSettings>(settings_id)).unwrap_or_default();
+    let mut cancel = false;
+    let mut submit = false;
+    egui::Window::new(tl!("Create captions"))
+        .id(egui::Id::unique("transcript-caption-settings-window"))
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.label(tl!("Choose how transcript words are grouped into captions."));
+            ui.horizontal(|ui| {
+                ui.label(tl!("Words per line"));
+                let resp = ui.add(egui::DragValue::new(&mut settings.words_per_line).range(1..=12));
+                app.auto.add("text.transcript.captions.wordsPerLine", resp.rect, "Maximum words per generated line");
+            });
+            ui.horizontal(|ui| {
+                ui.label(tl!("Words per caption"));
+                let resp = ui.add(egui::DragValue::new(&mut settings.words_per_caption).range(1..=24));
+                app.auto.add("text.transcript.captions.wordsPerCaption", resp.rect, "Maximum words per generated caption");
+            });
+            ui.horizontal(|ui| {
+                ui.label(tl!("Lines per caption"));
+                let resp = ui.add(egui::DragValue::new(&mut settings.lines).range(1..=5));
+                app.auto.add("text.transcript.captions.lines", resp.rect, "Maximum generated caption lines");
+            });
+            ui.horizontal(|ui| {
+                if ui.button(tl!("Cancel")).clicked() {
+                    cancel = true;
+                }
+                if ui.button(tl!("Create captions")).clicked() {
+                    submit = true;
+                }
+            });
+        });
+    if cancel {
+        open = false;
+    }
+    if submit {
+        actions.push((
+            "transcript.createCaptions".into(),
+            json!({
+                "maxWordsPerLine": settings.words_per_line,
+                "maxWordsPerCaption": settings.words_per_caption,
+                "lines": settings.lines,
+            }),
+        ));
+        open = false;
+    }
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(open_id, open);
+        data.insert_temp(settings_id, settings);
+    });
+}
+
 fn filmcraft_speech_available(app: &FilmcraftApp) -> bool {
     app.session.transcriber.is_some() || filmcraft_engine::transcript::speech_available()
 }
@@ -658,72 +775,247 @@ fn filmcraft_speech_available(app: &FilmcraftApp) -> bool {
 fn style_strip(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, track_idx: usize, actions: &mut Vec<(String, Value)>) {
     let Some(tr) = app.session.active_sequence().and_then(|q| q.caption_tracks.get(track_idx)).cloned() else { return };
     let st = tr.style.clone();
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt("caption-style"));
-    child.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let r = egui::ComboBox::from_id_salt(("caption-font", tr.id.0)).selected_text(&st.font).width(130.0).height(400.0).show_ui(ui, |ui| {
-            if !filmcraft_text::fonts::system_scanned() {
-                filmcraft_text::fonts::scan_system();
-            }
-            // names starting with '.' are macOS-private system faces (UI/fallback fonts, some without a space glyph)
-            for (f, _) in filmcraft_text::families().into_iter().filter(|(f, _)| !f.starts_with('.')) {
-                let resp = ui.selectable_label(f.eq_ignore_ascii_case(&st.font), &f);
-                // An edge row may be only partly visible; automation must click its visible portion.
-                let visible = resp.rect.intersect(ui.clip_rect());
-                if visible.is_positive() {
-                    app.auto.add(&format!("text.captions.style.font.option.{f}"), visible, &f);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt("caption-template-settings"));
+    egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt(("caption-style-scroll", tr.id.0)).show(&mut child, |ui| {
+        ui.set_min_width(r.width());
+        ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+        ui.label(egui::RichText::new(tl!("Template and animation")).strong().color(app.tokens.text_dim));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(tl!("Template")).size(11.0).color(app.tokens.text_dim));
+            let label = crate::i18n::t(st.template.label());
+            let resp = egui::ComboBox::from_id_salt(("caption-template", tr.id.0)).selected_text(label).width(190.0).show_ui(ui, |ui| {
+                for template in CaptionTemplate::BUILT_IN {
+                    let name = crate::i18n::t(template.label());
+                    let option = ui.selectable_label(st.template == template, name);
+                    app.auto.add(&format!("text.captions.template.option.{}", template.id()), option.rect, name);
+                    if option.clicked() {
+                        actions.push(("captions.applyTemplate".into(), json!({"track": tr.id.0, "template": template.id()})));
+                    }
                 }
+            });
+            app.auto.add("text.captions.template", resp.response.rect, "Caption template");
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(tl!("Words/group")).size(11.0).color(app.tokens.text_dim));
+            let mut words = st.words_per_group.clamp(1, 5);
+            let resp = ui.add(egui::DragValue::new(&mut words).range(1..=5));
+            app.auto.add("text.captions.style.wordsPerGroup", resp.rect, "Words per group");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "wordsPerGroup": words})));
+            }
+            let tip = tl!("Speed changes fallback timing and motion; transcript-synced word boundaries stay unchanged");
+            ui.label(egui::RichText::new(tl!("Speed")).size(11.0).color(app.tokens.text_dim)).on_hover_text(tip);
+            let mut speed = if st.animation_speed.is_finite() { st.animation_speed.clamp(0.25, 4.0) } else { 1.0 };
+            let resp = ui
+                .add_sized([90.0, ui.spacing().interact_size.y], egui::Slider::new(&mut speed, 0.25..=4.0).step_by(0.05).fixed_decimals(2))
+                .on_hover_text(tip);
+            app.auto.add("text.captions.style.animationSpeed", resp.rect, "Caption animation speed");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "animationSpeed": speed})));
+            }
+            let mut highlight = Color32::from_rgba_unmultiplied(st.highlight_color[0], st.highlight_color[1], st.highlight_color[2], st.highlight_color[3]);
+            ui.label(egui::RichText::new(tl!("Highlight")).size(11.0).color(app.tokens.text_dim));
+            let resp = egui::color_picker::color_edit_button_srgba(ui, &mut highlight, egui::color_picker::Alpha::Opaque);
+            app.auto.add("text.captions.style.highlightColor", resp.rect, "Active word highlight colour");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "highlightColor": highlight.to_srgba_unmultiplied()})));
+            }
+        });
+        if st.animation == filmcraft_project::CaptionAnimation::WordMarkerBox {
+            ui.separator();
+            ui.label(egui::RichText::new(tl!("Active word box")).strong().color(app.tokens.text_dim));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(tl!("Fill opacity")).size(11.0).color(app.tokens.text_dim));
+                let mut opacity = st.word_marker_opacity.min(100);
+                let resp = ui.add(egui::Slider::new(&mut opacity, 0..=100).suffix("%"));
+                app.auto.add("text.captions.style.wordMarkerOpacity", resp.rect, "Word marker fill opacity");
+                if resp.changed() {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "wordMarkerOpacity": opacity})));
+                }
+                ui.label(egui::RichText::new(tl!("Border")).size(11.0).color(app.tokens.text_dim));
+                let mut border_width = st.word_marker_border_width;
+                let resp = ui.add(crate::widgets::number_drag(&mut border_width).range(0.0..=20.0).speed(0.25).suffix(" px"));
+                app.auto.add("text.captions.style.wordMarkerBorderWidth", resp.rect, "Word marker border width");
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "wordMarkerBorderWidth": border_width})));
+                }
+                let mut border_color = Color32::from_rgba_unmultiplied(
+                    st.word_marker_border_color[0],
+                    st.word_marker_border_color[1],
+                    st.word_marker_border_color[2],
+                    st.word_marker_border_color[3],
+                );
+                let resp = egui::color_picker::color_edit_button_srgba(ui, &mut border_color, egui::color_picker::Alpha::Opaque);
+                app.auto.add("text.captions.style.wordMarkerBorderColor", resp.rect, "Word marker border colour");
+                if resp.changed() {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "wordMarkerBorderColor": border_color.to_srgba_unmultiplied()})));
+                }
+                ui.label(egui::RichText::new(tl!("Corner radius")).size(11.0).color(app.tokens.text_dim));
+                let mut radius = st.word_marker_radius;
+                let resp = ui.add(crate::widgets::number_drag(&mut radius).range(0.0..=40.0).speed(0.25).suffix(" px"));
+                app.auto.add("text.captions.style.wordMarkerRadius", resp.rect, "Word marker corner radius");
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "wordMarkerRadius": radius})));
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label(egui::RichText::new(tl!("Text")).strong().color(app.tokens.text_dim));
+        ui.horizontal_wrapped(|ui| {
+            let font_picker = egui::ComboBox::from_id_salt(("caption-font", tr.id.0)).selected_text(&st.font).width(150.0).height(400.0).show_ui(ui, |ui| {
+                if !filmcraft_text::fonts::system_scanned() {
+                    filmcraft_text::fonts::scan_system();
+                }
+                for (font, _) in filmcraft_text::families().into_iter().filter(|(font, _)| !font.starts_with('.')) {
+                    let resp = ui.selectable_label(font.eq_ignore_ascii_case(&st.font), &font);
+                    let visible = resp.rect.intersect(ui.clip_rect());
+                    if visible.is_positive() {
+                        app.auto.add(&format!("text.captions.style.font.option.{font}"), visible, &font);
+                    }
+                    if resp.clicked() {
+                        actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "font": font})));
+                    }
+                }
+            });
+            app.auto.add("text.captions.style.font", font_picker.response.rect, "Caption font");
+            let mut size = st.size;
+            let resp = ui.add(crate::widgets::number_drag(&mut size).range(8.0..=200.0).speed(0.5).suffix(" px"));
+            app.auto.add("text.captions.style.size", resp.rect, "Caption size");
+            let escaped = resp.drag_stopped() && ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if !escaped && (resp.drag_stopped() || (resp.changed() && !resp.dragged())) {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "size": size})));
+            }
+            let mut color = Color32::from_rgba_unmultiplied(st.color[0], st.color[1], st.color[2], st.color[3]);
+            let resp = egui::color_picker::color_edit_button_srgba(ui, &mut color, egui::color_picker::Alpha::Opaque);
+            app.auto.add("text.captions.style.color", resp.rect, "Text colour");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "color": color.to_srgba_unmultiplied()})));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(tl!("Text align")).size(11.0).color(app.tokens.text_dim));
+            for (align, short, name) in [(CaptionAlign::Left, "L", "left"), (CaptionAlign::Center, "C", "center"), (CaptionAlign::Right, "R", "right")] {
+                let resp = ui.selectable_label(st.align == align, short).on_hover_text(tlf!("Align text {name}", name = name));
+                app.auto.add(&format!("text.captions.style.align.{name}"), resp.rect, name);
                 if resp.clicked() {
-                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "font": f})));
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "align": name})));
+                }
+            }
+            ui.label(egui::RichText::new(tl!("Position")).size(11.0).color(app.tokens.text_dim));
+            for (anchor, name) in [(CaptionAnchor::Top, "top"), (CaptionAnchor::Middle, "middle"), (CaptionAnchor::Bottom, "bottom")] {
+                let resp = ui.selectable_label(st.anchor == anchor, name[..1].to_uppercase()).on_hover_text(tlf!("Position: {name}", name = name));
+                app.auto.add(&format!("text.captions.style.anchor.{name}"), resp.rect, name);
+                if resp.clicked() {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "anchor": name})));
                 }
             }
         });
-        app.auto.add("text.captions.style.font", r.response.rect, "Caption font");
-        let mut size = st.size;
-        let resp = ui.add(crate::widgets::number_drag(&mut size).range(8.0..=200.0).speed(0.5).suffix(" px"));
-        app.auto.add("text.captions.style.size", resp.rect, "Caption size");
-        // a drag ended by Escape keeps the size it had (#580)
-        let escaped = resp.drag_stopped() && ui.input(|i| i.key_pressed(egui::Key::Escape));
-        if !escaped && (resp.drag_stopped() || (resp.changed() && !resp.dragged())) {
-            actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "size": size})));
-        }
-        let mut col = Color32::from_rgba_unmultiplied(st.color[0], st.color[1], st.color[2], st.color[3]);
-        let resp = egui::color_picker::color_edit_button_srgba(ui, &mut col, egui::color_picker::Alpha::Opaque);
-        app.auto.add("text.captions.style.color", resp.rect, "Text colour");
-        if resp.changed() {
-            let c = col.to_srgba_unmultiplied();
-            actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "color": c})));
-        }
-        let mut bg = st.background;
-        let resp = ui.checkbox(&mut bg, tl!("Box"));
-        app.auto.add("text.captions.style.background", resp.rect, "Background box");
-        if resp.changed() {
-            actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "background": bg})));
-        }
-        ui.label(egui::RichText::new(tl!("Align")).size(11.0).color(app.tokens.text_dim));
-        for (a, icon_txt, name, tip) in [
-            (CaptionAlign::Left, "L", "left", tl!("Align left")),
-            (CaptionAlign::Center, "C", "center", tl!("Align center")),
-            (CaptionAlign::Right, "R", "right", tl!("Align right")),
-        ] {
-            let resp = ui.selectable_label(st.align == a, icon_txt).on_hover_text(tip);
-            app.auto.add(&format!("text.captions.style.align.{name}"), resp.rect, name);
-            if resp.clicked() {
-                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "align": name})));
+
+        ui.separator();
+        ui.label(egui::RichText::new(tl!("Layout")).strong().color(app.tokens.text_dim));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(tl!("Max lines")).size(11.0).color(app.tokens.text_dim))
+                .on_hover_text(tl!("Keeps all words visible by reducing text size when needed"));
+            let mut max_lines = st.max_lines.clamp(1, 5);
+            let resp = ui.add(egui::DragValue::new(&mut max_lines).range(1..=5));
+            app.auto.add("text.captions.style.maxLines", resp.rect, "Maximum caption lines");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "maxLines": max_lines})));
             }
-        }
-        ui.label(egui::RichText::new(tl!("Position")).size(11.0).color(app.tokens.text_dim));
-        for (a, name, tip) in [
-            (CaptionAnchor::Top, "top", tl!("Position: top")),
-            (CaptionAnchor::Middle, "middle", tl!("Position: middle")),
-            (CaptionAnchor::Bottom, "bottom", tl!("Position: bottom")),
-        ] {
-            let resp = ui.selectable_label(st.anchor == a, name[..1].to_uppercase()).on_hover_text(tip);
-            app.auto.add(&format!("text.captions.style.anchor.{name}"), resp.rect, name);
-            if resp.clicked() {
-                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "anchor": name})));
+            ui.label(egui::RichText::new(tl!("Line spacing")).size(11.0).color(app.tokens.text_dim));
+            let mut line_spacing = st.line_spacing;
+            let resp = ui.add(crate::widgets::number_drag(&mut line_spacing).range(0.8..=4.0).speed(0.05));
+            app.auto.add("text.captions.style.lineSpacing", resp.rect, "Line spacing");
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "lineSpacing": line_spacing})));
             }
-        }
+            ui.label(egui::RichText::new(tl!("Margin %")).size(11.0).color(app.tokens.text_dim));
+            let mut margin = (st.margin * 100.0).clamp(0.0, 45.0);
+            let resp = ui.add(crate::widgets::number_drag(&mut margin).range(0.0..=45.0).speed(0.25).suffix("%"));
+            app.auto.add("text.captions.style.margin", resp.rect, "Caption edge margin");
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "margin": margin / 100.0})));
+            }
+        });
+
+        ui.separator();
+        ui.label(egui::RichText::new(tl!("Background box")).strong().color(app.tokens.text_dim));
+        ui.horizontal_wrapped(|ui| {
+            let mut background = st.background;
+            let resp = ui.checkbox(&mut background, tl!("Box"));
+            app.auto.add("text.captions.style.background", resp.rect, "Background box");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "background": background})));
+            }
+            let mut background_color =
+                Color32::from_rgba_unmultiplied(st.background_color[0], st.background_color[1], st.background_color[2], st.background_color[3]);
+            let resp = egui::color_picker::color_edit_button_srgba(ui, &mut background_color, egui::color_picker::Alpha::OnlyBlend);
+            app.auto.add("text.captions.style.backgroundColor", resp.rect, "Background colour");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "backgroundColor": background_color.to_srgba_unmultiplied()})));
+            }
+            ui.label(egui::RichText::new(tl!("Box align")).size(11.0).color(app.tokens.text_dim));
+            for (align, short, name) in [(CaptionAlign::Left, "L", "left"), (CaptionAlign::Center, "C", "center"), (CaptionAlign::Right, "R", "right")] {
+                let resp = ui.selectable_label(st.box_align == align, short).on_hover_text(tlf!("Align the background box {name}", name = name));
+                app.auto.add(&format!("text.captions.style.boxAlign.{name}"), resp.rect, name);
+                if resp.clicked() {
+                    actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "boxAlign": name})));
+                }
+            }
+        });
+
+        ui.separator();
+        ui.label(egui::RichText::new(tl!("Outline and shadow")).strong().color(app.tokens.text_dim));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(tl!("Outline")).size(11.0).color(app.tokens.text_dim));
+            let mut outline = st.outline;
+            let resp = ui.add(crate::widgets::number_drag(&mut outline).range(0.0..=40.0).speed(0.25).suffix(" px"));
+            app.auto.add("text.captions.style.outline", resp.rect, "Text outline width");
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "outline": outline})));
+            }
+            let mut outline_color = Color32::from_rgba_unmultiplied(st.outline_color[0], st.outline_color[1], st.outline_color[2], st.outline_color[3]);
+            let resp = egui::color_picker::color_edit_button_srgba(ui, &mut outline_color, egui::color_picker::Alpha::Opaque);
+            app.auto.add("text.captions.style.outlineColor", resp.rect, "Outline colour");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "outlineColor": outline_color.to_srgba_unmultiplied()})));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let mut shadow = st.shadow;
+            let resp = ui.checkbox(&mut shadow, tl!("Shadow"));
+            app.auto.add("text.captions.style.shadow", resp.rect, "Drop shadow");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "shadow": shadow})));
+            }
+            let mut shadow_color = Color32::from_rgba_unmultiplied(st.shadow_color[0], st.shadow_color[1], st.shadow_color[2], st.shadow_color[3]);
+            let resp = egui::color_picker::color_edit_button_srgba(ui, &mut shadow_color, egui::color_picker::Alpha::OnlyBlend);
+            app.auto.add("text.captions.style.shadowColor", resp.rect, "Shadow colour");
+            if resp.changed() {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "shadowColor": shadow_color.to_srgba_unmultiplied()})));
+            }
+            ui.label(egui::RichText::new(tl!("Blur")).size(11.0).color(app.tokens.text_dim));
+            let mut blur = st.shadow_blur;
+            let resp = ui.add(crate::widgets::number_drag(&mut blur).range(0.0..=40.0).speed(0.25).suffix(" px"));
+            app.auto.add("text.captions.style.shadowBlur", resp.rect, "Shadow blur");
+            if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                actions.push(("captions.setStyle".into(), json!({"track": tr.id.0, "shadowBlur": blur})));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for (axis, value, label) in [("X", st.shadow_offset_x, tl!("Shadow horizontal offset")), ("Y", st.shadow_offset_y, tl!("Shadow vertical offset"))] {
+                ui.label(egui::RichText::new(tlf!("Offset {axis}", axis = axis)).size(11.0).color(app.tokens.text_dim));
+                let mut offset = value;
+                let resp = ui.add(crate::widgets::number_drag(&mut offset).range(-40.0..=40.0).speed(0.25).suffix(" px"));
+                app.auto.add(&format!("text.captions.style.shadowOffset{axis}"), resp.rect, label);
+                if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                    let params =
+                        if axis == "X" { json!({"track": tr.id.0, "shadowOffsetX": offset}) } else { json!({"track": tr.id.0, "shadowOffsetY": offset}) };
+                    actions.push(("captions.setStyle".into(), params));
+                }
+            }
+        });
     });
 }
 
@@ -750,7 +1042,7 @@ mod tests {
         if !crate::i18n::install_japanese_font(&ctx) {
             return;
         }
-        let labels = ["Transcript", "Captions", "Graphics", "文字起こし", "キャプション", "グラフィックス"];
+        let labels = ["Transcript", "Captions", "Template", "Graphics", "文字起こし", "キャプション", "テンプレート", "グラフィックス"];
         let mut widths = Vec::new();
         for _ in 0..2 {
             // the added font is in place from the second pass
@@ -762,9 +1054,9 @@ mod tests {
             });
             out.textures_delta.clear();
         }
-        assert_eq!(widths[..3], [70.0, 56.0, 56.0], "Latin tabs keep 7 px per character");
-        // 5, 6 and 7 Japanese characters of about 12.5 px each, far over the 7 px per character estimate
-        for ((width, chars), label) in widths[3..].iter().zip([5.0_f32, 6.0, 7.0]).zip(&labels[3..]) {
+        assert_eq!(widths[..4], [70.0, 56.0, 56.0, 56.0], "Latin tabs keep 7 px per character");
+        // Japanese glyphs are about twice as wide as the Latin per-character estimate.
+        for ((width, chars), label) in widths[4..].iter().zip([5.0_f32, 6.0, 6.0, 7.0]).zip(&labels[4..]) {
             assert!(*width > chars * 7.0 * 1.5, "{label}: {width} px");
         }
     }

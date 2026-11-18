@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use filmcraft_project::{Caption, ClipId, ItemId, Sequence, TrackId, Transcript};
+use filmcraft_project::{Caption, CaptionWordTiming, ClipId, ItemId, Sequence, TrackId, Transcript};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 
 use crate::EditCtx;
@@ -275,6 +275,10 @@ pub fn ripple_delete_ranges(seq: &mut Sequence, ranges: Vec<TimeRange>, ctx: &mu
 pub struct CaptionRules {
     /// Maximum characters per line.
     pub max_chars: usize,
+    /// Maximum words on each generated caption line.
+    pub max_words_per_line: usize,
+    /// Maximum words in each generated caption.
+    pub max_words_per_caption: usize,
     /// Lines per caption (1 = single, 2 = double).
     pub lines: usize,
     /// Minimum caption duration; a short caption is extended into the silence after it, never
@@ -292,6 +296,8 @@ impl Default for CaptionRules {
     fn default() -> Self {
         Self {
             max_chars: 42,
+            max_words_per_line: 5,
+            max_words_per_caption: 10,
             lines: 2,
             min_duration: Tick(TICKS_PER_SECOND),
             max_duration: Tick(7 * TICKS_PER_SECOND),
@@ -321,37 +327,51 @@ pub struct CaptionBlock {
 pub fn caption_blocks(words: &[SeqWord], rules: &CaptionRules, rate: FrameRate) -> Vec<CaptionBlock> {
     let max_chars = rules.max_chars.max(1);
     let max_lines = rules.lines.max(1);
-    let cap_chars = max_chars * max_lines;
+    let max_words_per_line = rules.max_words_per_line.max(1);
+    let max_words_per_caption = rules.max_words_per_caption.max(1);
+    let cap_chars = max_chars.saturating_mul(max_lines);
     let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
     let mut a = 0;
     let mut lines: Vec<usize> = vec![0];
+    let mut line_words = vec![0usize];
+    let mut group_words = 0usize;
     for i in 0..words.len() {
         let w = &words[i];
         let len = w.text.chars().count();
         if i > a {
             let prev = &words[i - 1];
             let cur = *lines.last().unwrap_or(&0);
-            let fits_line = cur + 1 + len <= max_chars;
-            let fits = fits_line || lines.len() < max_lines;
-            let used: usize = lines.iter().sum::<usize>() + lines.len() - 1;
-            let sentence_end = prev.text.ends_with(['.', '?', '!']) && used * 2 >= cap_chars;
+            let words_on_line = *line_words.last().unwrap_or(&0);
+            let fits_line = cur.saturating_add(1).saturating_add(len) <= max_chars && words_on_line < max_words_per_line;
+            let fits = (fits_line || lines.len() < max_lines) && group_words < max_words_per_caption;
+            let used = lines.iter().fold(lines.len().saturating_sub(1), |sum, line| sum.saturating_add(*line));
+            let sentence_end = prev.text.ends_with(['.', '?', '!']) && used.saturating_mul(2) >= cap_chars;
             let brk =
                 !fits || w.speaker != prev.speaker || w.start - prev.end >= rules.break_pause || w.end - words[a].start > rules.max_duration || sentence_end;
             if brk {
                 groups.push(a..i);
                 a = i;
                 lines = vec![len];
+                line_words = vec![1];
+                group_words = 1;
                 continue;
             }
             if fits_line {
                 if let Some(l) = lines.last_mut() {
-                    *l += 1 + len;
+                    *l = l.saturating_add(1).saturating_add(len);
+                }
+                if let Some(count) = line_words.last_mut() {
+                    *count = count.saturating_add(1);
                 }
             } else {
                 lines.push(len);
+                line_words.push(1);
             }
+            group_words = group_words.saturating_add(1);
         } else {
             lines = vec![len];
+            line_words = vec![1];
+            group_words = 1;
         }
     }
     if a < words.len() {
@@ -364,10 +384,11 @@ pub fn caption_blocks(words: &[SeqWord], rules: &CaptionRules, rate: FrameRate) 
     for g in groups {
         let mut text_lines: Vec<String> = vec![String::new()];
         for w in &words[g.clone()] {
+            let words_on_line = text_lines.last().map_or(0, |line| line.split_whitespace().count());
             let Some(l) = text_lines.last_mut() else { break };
             if l.is_empty() {
                 l.push_str(&w.text);
-            } else if l.chars().count() + 1 + w.text.chars().count() <= max_chars {
+            } else if l.chars().count().saturating_add(1).saturating_add(w.text.chars().count()) <= max_chars && words_on_line < max_words_per_line {
                 l.push(' ');
                 l.push_str(&w.text);
             } else {
@@ -408,17 +429,31 @@ pub fn caption_blocks(words: &[SeqWord], rules: &CaptionRules, rate: FrameRate) 
 }
 
 /// Caption blocks as captions (ids from `ctx`).
-pub fn blocks_to_captions(blocks: &[CaptionBlock], ctx: &mut EditCtx) -> Vec<Caption> {
+pub fn blocks_to_captions(blocks: &[CaptionBlock], words: &[SeqWord], ctx: &mut EditCtx) -> Vec<Caption> {
     blocks
         .iter()
-        .map(|b| Caption {
-            id: ClipId(ctx.alloc()),
-            start: b.start,
-            duration: b.end - b.start,
-            text: b.text.clone(),
-            speaker: b.speaker.clone(),
-            cue_id: None,
-            settings: String::new(),
+        .map(|b| {
+            let duration = b.end - b.start;
+            let word_timings = b
+                .words
+                .clone()
+                .filter_map(|i| words.get(i))
+                .map(|word| {
+                    let start = word.start.0.saturating_sub(b.start.0).clamp(0, duration.0);
+                    let end = word.end.0.saturating_sub(b.start.0).clamp(start, duration.0);
+                    CaptionWordTiming { start: Tick(start), end: Tick(end) }
+                })
+                .collect();
+            Caption {
+                id: ClipId(ctx.alloc()),
+                start: b.start,
+                duration,
+                text: b.text.clone(),
+                word_timings,
+                speaker: b.speaker.clone(),
+                cue_id: None,
+                settings: String::new(),
+            }
         })
         .collect()
 }

@@ -89,6 +89,19 @@ It returns explicit model errors for invalid table values, and a unit test check
 values map uniquely. This was done so the Whisper-enabled engine can pass the project's Clippy
 no-panic checks.
 
+### Caption animation templates
+
+The Text panel has a dedicated **Template** tab between Captions and Graphics for caption styles.
+It offers Classic, Color Pop, Shine, Type on (2 characters), Word by word, Karaoke highlight, and
+Pop word looks, plus box and underline word markers. Transcript-generated cues preserve per-word
+timings for audio-synced animation; other cues use even cue timing, and manual text/time edits
+discard stale word timing. Template settings include group size, speed, highlight colour, a 1–5
+line limit (font scales down to preserve all text), independent box alignment, adjustable drop
+shadow, and word-marker box fill opacity, border colour/width, and corner radius. Creating captions
+from the Transcript tab now exposes words-per-line and words-per-caption controls. Templates
+affect monitor/burn-in rendering but not caption sidecar exports. See
+[caption templates](docs/captions.md).
+
 ## Working context and preferences
 
 - The user has been developing and testing a Gospel Mix promotional sequence and asked for the

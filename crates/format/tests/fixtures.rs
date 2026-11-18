@@ -354,6 +354,7 @@ fn next_id_is_raised_past_every_id_in_the_file() {
                     start: Tick::ZERO,
                     duration: Tick(1),
                     text: "Hi".into(),
+                    word_timings: Vec::new(),
                     speaker: None,
                     cue_id: None,
                     settings: String::new(),
